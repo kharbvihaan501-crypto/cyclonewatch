@@ -37,6 +37,7 @@ THRESHOLD_BASIN = "NI"  # the main model is trained and checked on the North Ind
 AMBER_SHARE = 0.75  # amber from 75% of the red threshold
 MODEL_PATH = Path(os.environ.get("CYCLONEWATCH_MODEL", ROOT / "models" / "ri_lgbm.txt"))
 CAL_PATH = MODEL_PATH.with_name("ri_calibration.json")
+FEATURES_JSON = MODEL_PATH.with_name("ri_lgbm_features.json")  # exact feature order + BASIN categories
 TRACKS_PATH = ROOT / "data" / "processed" / "tracks.parquet"
 DEFAULT_STORM = ("AMPHAN", 2020)
 TITLE = "CycloneWatch: will this cyclone suddenly strengthen in the next 24 hours?"
@@ -117,11 +118,20 @@ class Model:
     def __init__(self):
         if MODEL_PATH.exists():
             import lightgbm as lgb
+            import json
             self.booster = lgb.Booster(model_file=str(MODEL_PATH))
-            self.cols = self.booster.feature_name()
-            missing = set(self.cols) - set(FEATURES)
-            assert not missing, f"model uses features the app does not build: {missing}"
-            self.name = f"LightGBM ({MODEL_PATH.name})"
+            if not FEATURES_JSON.exists():
+                raise FileNotFoundError(f"{FEATURES_JSON} is needed next to {MODEL_PATH.name} "
+                                        "(feature order and BASIN categories); the app will not guess them.")
+            spec = json.loads(FEATURES_JSON.read_text(encoding="utf-8"))
+            assert Path(spec["main_file"]).name == MODEL_PATH.name, \
+                f"{FEATURES_JSON.name} describes {spec['main_file']}, not {MODEL_PATH.name}"
+            self.cols = list(spec["features"])
+            self.cat_cols = list(spec.get("categorical_features", []))
+            self.categories = {"BASIN": list(spec["basin_categories"])}
+            assert self.cols == self.booster.feature_name(), \
+                f"feature order in {FEATURES_JSON.name} differs from the model file"
+            self.name = f"LightGBM ({MODEL_PATH.name}, {spec.get('main_model', 'main model')})"
             self.cal = None
             if CAL_PATH.exists():
                 import json
@@ -131,6 +141,7 @@ class Model:
                     self.name += ", Platt-calibrated on 2016-2019 validation storms"
         else:
             self.booster = None
+            self.cols, self.cat_cols, self.categories = ["DWIND_24"], [], {}
             self.pers = fit_persistence(pd.read_parquet(TRAIN_PATH))
             self.name = ("Persistence baseline (last-24h wind change only, fitted on 1980-2015). "
                          f"Trained model {MODEL_PATH.as_posix().replace(ROOT.as_posix() + '/', '')} not found.")
@@ -140,11 +151,28 @@ class Model:
         self.threshold, self.val_rate = threshold_for_alert_rate(val, "P", ALERT_RATE)
         self.amber_from = AMBER_SHARE * self.threshold
 
+    def matrix(self, X: pd.DataFrame) -> pd.DataFrame:
+        """Model input: exactly self.cols in order. A column X lacks becomes NaN; categorical
+        columns use the categories from the feature JSON."""
+        M = pd.DataFrame(index=X.index)
+        for c in self.cols:
+            col = X[c] if c in X else pd.Series(np.nan, index=X.index)
+            if c in self.cat_cols:
+                M[c] = pd.Categorical(col.astype(object), categories=self.categories[c])
+            else:
+                M[c] = pd.to_numeric(col, errors="coerce").astype(float)
+        return M
+
+    def missing_inputs(self, X: pd.DataFrame) -> list[str]:
+        """Features of this model that are missing (NaN) in the first row of X."""
+        M = self.matrix(X.iloc[[0]])
+        return [c for c in self.cols if pd.isna(M[c].iloc[0])]
+
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         if self.booster is not None:
-            p = self.booster.predict(X[self.cols])
+            p = self.booster.predict(self.matrix(X))
             return apply_platt(p, self.cal["a"], self.cal["b"]) if self.cal else p
-        return self.pers.predict_proba(X[["DWIND_24"]].to_numpy())[:, 1]
+        return self.pers.predict_proba(self.matrix(X).to_numpy())[:, 1]
 
     def reasons(self, X: pd.DataFrame) -> list[str]:
         """Top 3 drivers for ONE row, in plain words."""
@@ -158,7 +186,7 @@ class Model:
                     "This fallback model looks only at the last-24h wind change.",
                     "Pressure, position, distance to land and season are not used until the "
                     "trained model is added."]
-        contrib = self.booster.predict(X[self.cols].iloc[[0]], pred_contrib=True)[0][:-1]
+        contrib = self.booster.predict(self.matrix(X.iloc[[0]]), pred_contrib=True)[0][:-1]
         by_group: dict[str, float] = {}
         for c, v in zip(self.cols, contrib):
             k = GROUPS.get(c, c)
@@ -202,6 +230,11 @@ FIELDS = [("wind", "Current wind (kt)"), ("pres", "Current pressure (hPa)"), ("l
           ("p24", "Pressure 24 h ago (hPa)")]
 
 
+FEATURE_WORDS = {"SPEED_12": "storm speed over the last 12 h", "DIR_12": "storm direction over the last 12 h",
+                 "SPEED_24": "storm speed over the last 24 h", "DIR_24": "storm direction over the last 24 h",
+                 "USA_PRES": "current pressure", "DPRES_24": "24 h pressure change"}
+
+
 def forecast(*vals):
     v = dict(zip([k for k, _ in FIELDS], vals))
     missing = [lab for (k, lab) in FIELDS if v[k] is None]
@@ -212,6 +245,10 @@ def forecast(*vals):
     X = bulletin_features(v)
     p = float(MODEL.predict(X)[0])
     lines = ["**Top 3 reasons**", "\n".join(f"{i}. {t}" for i, t in enumerate(MODEL.reasons(X), 1))]
+    gone = MODEL.missing_inputs(X)
+    if gone:
+        lines.append("**Not available from these inputs (left missing for the model):** "
+                     + ", ".join(f"{c} ({FEATURE_WORDS.get(c, c)})" for c in gone))
     if v["dist"] <= 0:
         lines.append("_Note: the storm is over land. The model was only checked on storms over water._")
     return alert_html(p, MODEL.level(p)), "\n\n".join(lines)
