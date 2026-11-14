@@ -251,10 +251,90 @@ def run_rate(rate: float) -> None:
     print(f"\n[appended to {RESULTS_LOG}]")
 
 
+# ------------------------------------------------------------------ --episodes mode
+def run_episodes(rate: float) -> None:
+    """MAIN at threshold_for_alert_rate(NI validation, MAIN prob, rate): when each RI episode first turns red.
+
+    NI over-water validation rows; episodes and lead time from src/eval/episodes.py.
+    FIRST_RED_H = hours from the episode's first row to the first red row of the alert that covers it:
+      caught  -> -LEAD_H (start of the unbroken red run reaching the first row; 0 = red only at that row;
+                 the run start is never earlier than the row after the storm's previous episode),
+      missed  -> hours after the first row until the first red row inside the episode (positive),
+      never red inside the episode -> blank.
+    """
+    _, val_ni, meta = load()
+    main_name = meta["main_model"]
+    col = "P_" + main_name
+    val_ni[col] = predict(meta["main_file"], meta["features"], val_ni)
+    thr, got = threshold_for_alert_rate(val_ni, col, rate)
+    water = val_ni[val_ni["DIST2LAND"] > 0]
+    eps, _ = episode_alerts(water, col, thr)
+    info = water.groupby("SID").agg(NAME=("NAME", "first"), SEASON=("SEASON", "first"),
+                                    SUBBASIN=("SUBBASIN", "first"))
+    eps = eps.join(info, on="SID").sort_values("START").reset_index(drop=True)
+
+    rows = []
+    for _, e in eps.iterrows():
+        inside = water[(water["SID"] == e["SID"]) & water["ISO_TIME"].between(e["START"], e["END"])]
+        assert len(inside) == e["N_ROWS"] and (inside[TARGET] == 1).all(), "episode rows mismatch"
+        red_inside = inside[inside[col] >= thr]
+        if e["CAUGHT"]:
+            first_red_h = -float(e["LEAD_H"])
+        elif len(red_inside):
+            first_red_h = (red_inside["ISO_TIME"].min() - e["START"]).total_seconds() / 3600
+        else:
+            first_red_h = np.nan
+        rows.append({"NAME": e["NAME"], "SEASON": int(e["SEASON"]), "SUBBASIN": e["SUBBASIN"],
+                     "START": e["START"].strftime("%Y-%m-%d %H:%M"), "ROWS": int(e["N_ROWS"]),
+                     "RED ROWS": len(red_inside), "ANY RED": "yes" if len(red_inside) else "no",
+                     "RED AT FIRST ROW": "yes" if e["CAUGHT"] else "no",
+                     "FIRST RED (h from first RI row)": "" if np.isnan(first_red_h) else f"{first_red_h:+.0f}",
+                     "LEAD h": "" if not e["CAUGHT"] else f"{e['LEAD_H']:.0f}",
+                     "MAX P IN EPISODE": round(float(inside[col].max()), 3)})
+    table = pd.DataFrame(rows)
+    n = len(table)
+    n_first = int((table["RED AT FIRST ROW"] == "yes").sum())
+    n_any = int((table["ANY RED"] == "yes").sum())
+    n_never = n - n_any
+    totals = [f"episodes with an alert at the first row:        {n_first} of {n}",
+              f"episodes with an alert at any row in the episode: {n_any} of {n}",
+              f"episodes never alerted:                           {n_never} of {n}"]
+    head = (f"MAIN ({main_name}) threshold {thr:.4f} (threshold_for_alert_rate(NI validation, prob, {rate:g}); "
+            f"achieved alert rate {100 * got:.2f}% of NI over-water validation rows)")
+    print(head + "\n")
+    print(table.to_string(index=False))
+    print("\n" + "\n".join(totals))
+
+    now = dt.datetime.now()
+    block = "\n".join([
+        f"\n## {now.strftime('%a %d %b %Y %H:%M')}: MAIN alert timing per RI episode at the 20% alert rate, NI "
+        "(VALIDATION 2016-2019)", "",
+        f"Command: `{CMD} --episodes {rate:g}`", "",
+        f"{head}. NI over-water validation rows only; saved MAIN model (no retraining). Episodes and lead time as in "
+        "src/eval/episodes.py. FIRST RED = hours from the episode's first RI row to the first red row: negative = "
+        "red before the episode started (the unbroken red run reaching the first row; equals -lead time, and the run "
+        "start is never earlier than the row after the storm's previous episode), 0 = red exactly at the first row, "
+        "positive = first red row later inside the episode, blank = never red inside the episode. RED ROWS = red rows "
+        "inside the episode. Test split not loaded.", "",
+        "```", table.to_string(index=False), "```", "",
+        "```", *totals, "```", "",
+    ])
+    with open(RESULTS_LOG, "a", encoding="utf-8") as f:
+        f.write(block + "\n")
+    print(f"\n[appended to {RESULTS_LOG}]")
+
+
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--alert-rate", type=float, default=None,
                     help="score the three LightGBM models at this NI alert rate (0-1), with CIs and MAIN episodes")
+    ap.add_argument("--episodes", type=float, default=None,
+                    help="MAIN alert timing for every RI episode at this NI alert rate (0-1)")
     args = ap.parse_args()
-    run_rate(args.alert_rate) if args.alert_rate is not None else main()
+    if args.episodes is not None:
+        run_episodes(args.episodes)
+    elif args.alert_rate is not None:
+        run_rate(args.alert_rate)
+    else:
+        main()

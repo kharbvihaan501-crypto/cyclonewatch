@@ -497,3 +497,31 @@ Missed:
 BULBUL:MATMO    2019 2019302N11118       BB 2019-11-07 06:00 2019-11-07 06:00       1       0.055             0.141
 ```
 
+
+## Sat 14 Nov 2026 18:48: MAIN alert timing per RI episode at the 20% alert rate, NI (VALIDATION 2016-2019)
+
+Command: `.venv\Scripts\python -m src.eval.ni_report --episodes 0.2`
+
+MAIN (NI-ONLY) threshold 0.0883 (threshold_for_alert_rate(NI validation, prob, 0.2); achieved alert rate 19.88% of NI over-water validation rows). NI over-water validation rows only; saved MAIN model (no retraining). Episodes and lead time as in src/eval/episodes.py. FIRST RED = hours from the episode's first RI row to the first red row: negative = red before the episode started (the unbroken red run reaching the first row; equals -lead time, and the run start is never earlier than the row after the storm's previous episode), 0 = red exactly at the first row, positive = first red row later inside the episode, blank = never red inside the episode. RED ROWS = red rows inside the episode. Test split not loaded.
+
+```
+        NAME  SEASON SUBBASIN            START  ROWS  RED ROWS ANY RED RED AT FIRST ROW FIRST RED (h from first RI row) LEAD h  MAX P IN EPISODE
+        MORA    2017       BB 2017-05-29 00:00     1         1     yes              yes                              -6      6             0.146
+       TITLI    2018       BB 2018-10-09 06:00     4         3     yes               no                              +6                    0.672
+        GAJA    2018       BB 2018-11-14 18:00     1         0      no               no                                                    0.044
+        FANI    2019       BB 2019-04-29 00:00     4         3     yes               no                              +6                    0.388
+        FANI    2019       BB 2019-05-01 12:00     2         0      no               no                                                    0.037
+        VAYU    2019       AS 2019-06-10 18:00     3         1     yes               no                             +12                    0.099
+ HIKAA:HIKKA    2019       AS 2019-09-23 00:00     2         0      no               no                                                    0.051
+ KYAAR:KYARR    2019       AS 2019-10-24 18:00     1         0      no               no                                                    0.072
+ KYAAR:KYARR    2019       AS 2019-10-25 06:00     6         6     yes              yes                              -6      6             0.560
+        MAHA    2019       AS 2019-11-02 18:00     3         0      no               no                                                    0.081
+BULBUL:MATMO    2019       BB 2019-11-07 06:00     1         0      no               no                                                    0.055
+```
+
+```
+episodes with an alert at the first row:        2 of 11
+episodes with an alert at any row in the episode: 5 of 11
+episodes never alerted:                           6 of 11
+```
+
