@@ -427,3 +427,73 @@ All basins, <= 400 km of land     199           57                    96        
 ```
 
 Note: persistence steps on the 342 over-water NI validation rows are 38.9% (threshold 0.0816, DWIND_24 >= 15 kt), 26.6% (0.1027, >= 20 kt), 14.3% (0.1285, >= 25 kt, used: 5.7 points from 20% vs 6.6 for 26.6%) and 8.5% (0.1598, >= 30 kt). The threshold is the same as in the earlier all-basins 20% run, so all subset numbers are unchanged; only the rule and the reported actual alert rate (14.3% on NI) differ. Steps listed with: `py -3.12 -c "...np.unique(P) over NI over-water val rows, share P >= t..."` (persistence fitted on train, as in baselines.py).
+
+## Alert rate changed from 18.2% to 20% on Sat 14 Nov 2026, 18:45, after seeing validation numbers; validation-only decision, test not touched.
+
+Command: `.venv\Scripts\python -m src.eval.ni_report --alert-rate 0.2`
+
+NI over-water validation rows (2016-2019) only. Saved models read from models/ (no retraining; MAIN = NI-ONLY, pre-registered choice unchanged). Thresholds: threshold_for_alert_rate(NI validation, prob, 0.2) per model. 95% CI: 1,000 bootstrap resamples of whole storms per subset (src/eval/metrics.py, seed 0); resamples with no RI rows skipped. Hard recall = recall on RI rows where the last-24h wind rose < 30 kt. Test split not loaded.
+
+```
+NI-ONLY (MAIN)   threshold 0.0883  achieved alert rate 19.88% of NI over-water rows
+ALL-BASINS       threshold 0.1775  achieved alert rate 19.88% of NI over-water rows
+LEAVE-NI-OUT     threshold 0.1752  achieved alert rate 19.88% of NI over-water rows
+```
+
+Summary:
+
+```
+         model             subset  caught caught % [95% CI] hard recall [95% CI] FA eps/storm [95% CI]      PR-AUC [95% CI] alert rate %
+    ALL-BASINS North Indian Ocean 2 of 11  18.2 [0.0, 50.0] 0.333 [0.118, 0.560]     0.87 [0.48, 1.30] 0.256 [0.084, 0.462]         19.9
+  LEAVE-NI-OUT North Indian Ocean 3 of 11  27.3 [0.0, 62.5] 0.375 [0.182, 0.613]     0.87 [0.52, 1.22] 0.253 [0.103, 0.410]         19.9
+NI-ONLY (MAIN) North Indian Ocean 2 of 11  18.2 [0.0, 42.9] 0.417 [0.176, 0.588]     0.87 [0.43, 1.35] 0.316 [0.102, 0.549]         19.9
+    ALL-BASINS      Bay of Bengal  2 of 6 33.3 [0.0, 100.0] 0.500 [0.000, 1.000]     0.43 [0.14, 0.79] 0.327 [0.069, 0.653]         20.6
+  LEAVE-NI-OUT      Bay of Bengal  2 of 6 33.3 [0.0, 100.0] 0.500 [0.000, 1.000]     0.64 [0.29, 1.07] 0.347 [0.069, 0.592]         19.1
+NI-ONLY (MAIN)      Bay of Bengal  1 of 6  16.7 [0.0, 66.7] 0.500 [0.000, 0.714]     0.64 [0.21, 1.15] 0.376 [0.074, 0.609]         23.4
+```
+
+Full evaluate() tables:
+
+```
+NI-ONLY (MAIN):
+            subset  storms  RI episodes  episodes caught      alert rate % episodes caught % recall (last-24h rise < 30 kt) false-alarm episodes / storm               PR-AUC boot used / skipped
+     Bay of Bengal      14            6                1 23.4 [10.9, 37.5]  16.7 [0.0, 66.7]           0.500 [0.000, 0.714]            0.64 [0.21, 1.15] 0.376 [0.074, 0.609]             998 / 2
+North Indian Ocean      23           11                2 19.9 [12.7, 27.8]  18.2 [0.0, 42.9]           0.417 [0.176, 0.588]            0.87 [0.43, 1.35] 0.316 [0.102, 0.549]            1000 / 0
+
+ALL-BASINS:
+            subset  storms  RI episodes  episodes caught      alert rate % episodes caught % recall (last-24h rise < 30 kt) false-alarm episodes / storm               PR-AUC boot used / skipped
+     Bay of Bengal      14            6                2  20.6 [8.9, 32.5] 33.3 [0.0, 100.0]           0.500 [0.000, 1.000]            0.43 [0.14, 0.79] 0.327 [0.069, 0.653]             998 / 2
+North Indian Ocean      23           11                2 19.9 [12.7, 26.9]  18.2 [0.0, 50.0]           0.333 [0.118, 0.560]            0.87 [0.48, 1.30] 0.256 [0.084, 0.462]            1000 / 0
+
+LEAVE-NI-OUT:
+            subset  storms  RI episodes  episodes caught      alert rate % episodes caught % recall (last-24h rise < 30 kt) false-alarm episodes / storm               PR-AUC boot used / skipped
+     Bay of Bengal      14            6                2  19.1 [9.9, 27.8] 33.3 [0.0, 100.0]           0.500 [0.000, 1.000]            0.64 [0.29, 1.07] 0.347 [0.069, 0.592]             998 / 2
+North Indian Ocean      23           11                3 19.9 [13.1, 26.7]  27.3 [0.0, 62.5]           0.375 [0.182, 0.613]            0.87 [0.52, 1.22] 0.253 [0.103, 0.410]            1000 / 0
+
+```
+
+MAIN (NI-ONLY) at threshold 0.0883: 2 caught of 11 RI episodes (NI over-water validation rows). Lead time = hours from the start of the unbroken red run to the episode's first row (0 h = red only at the first RI row), as in src/eval/episodes.py.
+
+Caught:
+
+```
+       NAME  SEASON           SID SUBBASIN            START              END  N_ROWS  P_AT_START  LEAD_H
+       MORA    2017 2017147N14087       BB 2017-05-29 00:00 2017-05-29 00:00       1       0.146     6.0
+KYAAR:KYARR    2019 2019296N15066       AS 2019-10-25 06:00 2019-10-26 12:00       6       0.235     6.0
+```
+
+Missed:
+
+```
+        NAME  SEASON           SID SUBBASIN            START              END  N_ROWS  P_AT_START  MAX_P_BEFORE_END
+       TITLI    2018 2018281N14088       BB 2018-10-09 06:00 2018-10-10 00:00       4       0.080             0.672
+        GAJA    2018 2018314N12093       BB 2018-11-14 18:00 2018-11-14 18:00       1       0.044             0.119
+        FANI    2019 2019116N02090       BB 2019-04-29 00:00 2019-04-29 18:00       4       0.058             0.388
+        FANI    2019 2019116N02090       BB 2019-05-01 12:00 2019-05-01 18:00       2       0.037             0.388
+        VAYU    2019 2019160N11073       AS 2019-06-10 18:00 2019-06-11 06:00       3       0.081             0.201
+ HIKAA:HIKKA    2019 2019264N19071       AS 2019-09-23 00:00 2019-09-23 06:00       2       0.051             0.051
+ KYAAR:KYARR    2019 2019296N15066       AS 2019-10-24 18:00 2019-10-24 18:00       1       0.072             0.072
+        MAHA    2019 2019301N05081       AS 2019-11-02 18:00 2019-11-03 06:00       3       0.049             0.266
+BULBUL:MATMO    2019 2019302N11118       BB 2019-11-07 06:00 2019-11-07 06:00       1       0.055             0.141
+```
+

@@ -3,6 +3,7 @@
 The test split is never loaded. Saved models are only read (no retraining).
 
 Run from the project root:  .venv\\Scripts\\python -m src.eval.ni_report
+  add --alert-rate 0.20 to score the three LightGBM models at a 20% NI alert rate (with CIs).
 
 (1) Persistence's probabilities come in steps (DWIND_24 in 5 kt steps), so the 18.1% alert rate
     of the LightGBM models is not reachable. Print the reachable NI over-water alert rates just
@@ -179,5 +180,81 @@ def main() -> None:
     print(f"\n[appended to {RESULTS_LOG}]")
 
 
+# --------------------------------------------------------------- --alert-rate mode
+def run_rate(rate: float) -> None:
+    """Three LightGBM models at threshold_for_alert_rate(NI validation, prob, rate), with storm-bootstrap CIs,
+    plus MAIN episode detail. No persistence rows; saved models only; test split never read."""
+    from src.eval.metrics import format_table
+
+    _, val_ni, meta = load()
+    main_name, models = meta["main_model"], meta["models"]
+    for name, m in models.items():
+        val_ni["P_" + name] = predict(m["file"], m["features"], val_ni)
+    assert np.allclose(val_ni["P_" + main_name], predict(meta["main_file"], meta["features"], val_ni)), \
+        "models/ri_lgbm.txt does not match the MAIN model file"
+
+    keep = ["subset", "storms", "RI episodes", "episodes caught", "alert rate %", "episodes caught %",
+            "recall (last-24h rise < 30 kt)", "false-alarm episodes / storm", "PR-AUC", "boot used / skipped"]
+    thr_lines, blocks, summary = [], [], []
+    thr = {}
+    for name in models:
+        col = "P_" + name
+        thr[name], got = threshold_for_alert_rate(val_ni, col, rate)
+        label = name + (" (MAIN)" if name == main_name else "")
+        thr_lines.append(f"{label:<16} threshold {thr[name]:.4f}  achieved alert rate {100 * got:.2f}% of NI over-water rows")
+        res = evaluate(val_ni, col, thr[name])
+        res = res[res["subset"].isin(SUBSETS)]
+        table = format_table(res)[keep]
+        blocks += [f"{label}:", table.to_string(index=False), ""]
+        for _, r in res.iterrows():
+            lo, hi = r["recall (last-24h rise < 30 kt) lo"], r["recall (last-24h rise < 30 kt) hi"]
+            summary.append({"model": label, "subset": r["subset"],
+                            "caught": f"{int(r['episodes caught'])} of {int(r['RI episodes'])}",
+                            "caught % [95% CI]": f"{r['episodes caught %']:.1f} [{r['episodes caught % lo']:.1f}, {r['episodes caught % hi']:.1f}]",
+                            "hard recall [95% CI]": f"{r['recall (last-24h rise < 30 kt)']:.3f} [{lo:.3f}, {hi:.3f}]",
+                            "FA eps/storm [95% CI]": f"{r['false-alarm episodes / storm']:.2f} [{r['false-alarm episodes / storm lo']:.2f}, {r['false-alarm episodes / storm hi']:.2f}]",
+                            "PR-AUC [95% CI]": f"{r['PR-AUC']:.3f} [{r['PR-AUC lo']:.3f}, {r['PR-AUC hi']:.3f}]",
+                            "alert rate %": f"{r['alert rate %']:.1f}"})
+    summary = pd.DataFrame(summary).sort_values(["subset", "model"], ascending=[False, True])
+    print("\n".join(thr_lines))
+    for s in SUBSETS:
+        print(f"\nVALIDATION 2016-2019, {s}, over water, {100 * rate:g}% alert-rate thresholds (set on NI rows)")
+        print(summary[summary["subset"] == s].drop(columns="subset").to_string(index=False))
+
+    caught, missed = episode_detail(val_ni, "P_" + main_name, thr[main_name])
+    show = lambda d: d.assign(START=d["START"].dt.strftime("%Y-%m-%d %H:%M"),  # noqa: E731
+                              END=d["END"].dt.strftime("%Y-%m-%d %H:%M")).round(3).to_string(index=False)
+    head = (f"MAIN ({main_name}) at threshold {thr[main_name]:.4f}: {len(caught)} caught of "
+            f"{len(caught) + len(missed)} RI episodes (NI over-water validation rows)")
+    print("\n" + head + "\ncaught episodes, lead time in hours:\n" + show(caught) + "\n\nmissed episodes:\n" + show(missed))
+
+    now = dt.datetime.now()
+    cmd = f"{CMD} --alert-rate {rate:g}"
+    block = "\n".join([
+        f"\n## Alert rate changed from 18.2% to {100 * rate:g}% on {now.strftime('%a %d %b %Y')}, "
+        f"{now.strftime('%H:%M')}, after seeing validation numbers; validation-only decision, test not touched.", "",
+        f"Command: `{cmd}`", "",
+        "NI over-water validation rows (2016-2019) only. Saved models read from models/ (no retraining; MAIN = "
+        f"{main_name}, pre-registered choice unchanged). Thresholds: threshold_for_alert_rate(NI validation, prob, "
+        f"{rate:g}) per model. 95% CI: 1,000 bootstrap resamples of whole storms per subset (src/eval/metrics.py, "
+        "seed 0); resamples with no RI rows skipped. Hard recall = recall on RI rows where the last-24h wind rose "
+        "< 30 kt. Test split not loaded.", "",
+        "```", *thr_lines, "```", "",
+        "Summary:", "", "```", summary.to_string(index=False), "```", "",
+        "Full evaluate() tables:", "", "```", *blocks, "```", "",
+        f"{head}. Lead time = hours from the start of the unbroken red run to the episode's first row (0 h = red "
+        "only at the first RI row), as in src/eval/episodes.py.", "",
+        "Caught:", "", "```", show(caught), "```", "", "Missed:", "", "```", show(missed), "```", "",
+    ])
+    with open(RESULTS_LOG, "a", encoding="utf-8") as f:
+        f.write(block + "\n")
+    print(f"\n[appended to {RESULTS_LOG}]")
+
+
 if __name__ == "__main__":
-    main()
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--alert-rate", type=float, default=None,
+                    help="score the three LightGBM models at this NI alert rate (0-1), with CIs and MAIN episodes")
+    args = ap.parse_args()
+    run_rate(args.alert_rate) if args.alert_rate is not None else main()
