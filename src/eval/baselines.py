@@ -9,6 +9,7 @@ Run from the project root (VALIDATION only; the test split is never loaded):
     py -3.12 -m src.eval.baselines                  # both baselines, max-F1 threshold
     py -3.12 -m src.eval.baselines --fa-target 1.0  # persistence at ~1 false-alarm episode per storm
     py -3.12 -m src.eval.baselines --alert-rate 0.20  # persistence at ~20% of NI over-water validation rows red
+    py -3.12 -m src.eval.baselines --min-rise 20    # persistence red when last-24h rise >= 20 kt
 """
 import argparse
 import datetime as dt
@@ -65,13 +66,17 @@ def run_matched(mode: str, target: float) -> None:
 
     mode "fa":   ~target false-alarm episodes per storm (all basins, over water).
     mode "rate": ~target share of over-water BASIN == NI rows on red (logged rule), target as a fraction.
+    mode "rise": fixed threshold = persistence probability at a last-24h rise of exactly `target` kt,
+                 i.e. red when DWIND_24 >= target (persistence is increasing in DWIND_24). The
+                 table keeps the Bay of Bengal and North Indian Ocean subsets.
     """
     train = pd.read_parquet(TRAIN_PATH)
     val = pd.read_parquet(VAL_PATH)
     assert train["SEASON"].max() <= 2015 and val["SEASON"].between(2016, 2019).all()
     assert not set(train["SID"]) & set(val["SID"]), "SID in both train and val"
     val = val.copy()
-    val["P_PERSISTENCE"] = predict_persistence(fit_persistence(train), val)
+    pers = fit_persistence(train)
+    val["P_PERSISTENCE"] = predict_persistence(pers, val)
 
     if mode == "fa":
         thr, got = threshold_for_false_alarms(val, "P_PERSISTENCE", target)
@@ -80,6 +85,18 @@ def run_matched(mode: str, target: float) -> None:
         rule = ("the distinct validation probability whose false-alarm episodes per storm "
                 "(all basins, over water) is closest to the target")
         cmd = f"py -3.12 -m src.eval.baselines --fa-target {target:g}"
+    elif mode == "rise":
+        assert pers.coef_[0, 0] > 0, "persistence must increase with DWIND_24"
+        thr = float(pers.predict_proba(np.array([[target]], float))[0, 1])
+        ni = val[(val["DIST2LAND"] > 0) & (val["BASIN"].astype(str) == ALERT_BASIN)]
+        red = ni["P_PERSISTENCE"] >= thr
+        assert (red == (ni["DWIND_24"] >= target)).all(), "threshold does not match DWIND_24 >= target"
+        got = float(red.mean())
+        label = f"Persistence, {ALERT_BASIN} step at last-24h rise >= {target:g} kt"
+        achieved = f"actual alert rate {100 * got:.1f}% of {ALERT_BASIN} over-water validation rows"
+        rule = (f"persistence probability at a last-24h wind rise of exactly {target:g} kt (red when "
+                f"DWIND_24 >= {target:g} kt); fixed by hand, not matched to a target rate")
+        cmd = f"py -3.12 -m src.eval.baselines --min-rise {target:g}"
     else:
         thr, got = threshold_for_alert_rate(val, "P_PERSISTENCE", target, basin=ALERT_BASIN)
         label = f"Persistence, {ALERT_BASIN} {100 * target:g}% rule"
@@ -95,8 +112,11 @@ def run_matched(mode: str, target: float) -> None:
             "false-alarm episodes / storm", "recall (last-24h rise < 30 kt)", "PR-AUC",
             "boot used / skipped"]
     table = format_table(res)[keep]
+    if mode == "rise":
+        table = table[table["subset"].isin(["Bay of Bengal", "North Indian Ocean"])]
     where = "all basins" if mode == "fa" else f"BASIN == {ALERT_BASIN}"
-    head = f"{label}: threshold {thr:.4f} (chosen on validation, {where} over water; {achieved})"
+    how = "set by rule" if mode == "rise" else "chosen on validation"
+    head = f"{label}: threshold {thr:.4f} ({how}, {where} over water; {achieved})"
     print(head)
     print(table.to_string(index=False))
 
@@ -104,8 +124,8 @@ def run_matched(mode: str, target: float) -> None:
     block = "\n".join([
         f"\n## {stamp}: {label} (VALIDATION 2016-2019)", "",
         f"Command: `{cmd}`", "",
-        f"Over-water rows only. Threshold = {rule}; chosen and scored on the same validation rows "
-        "(optimistic). Alert rate = share of over-water rows on red; red hours / storm = 6 h x red "
+        f"Over-water rows only. Threshold = {rule}; scored on validation rows "
+        "(threshold choice also used validation: optimistic). Alert rate = share of over-water rows on red; red hours / storm = 6 h x red "
         "rows / storms. 95% CI: 1,000 storm bootstrap resamples per subset, "
         f"seed {SEED}; resamples with no RI rows skipped. Test split not loaded.", "",
         f"**{head}**", "", "```", table.to_string(index=False), "```", "",
@@ -121,9 +141,13 @@ def main(argv: list[str] | None = None) -> None:
                     help="run persistence only, at ~this many false-alarm episodes per storm")
     ap.add_argument("--alert-rate", type=float, default=None,
                     help="run persistence only, at ~this share (0-1) of over-water rows on red")
+    ap.add_argument("--min-rise", type=float, default=None,
+                    help="run persistence only, red when the last-24h wind rise >= this many kt")
     args = ap.parse_args(argv)
-    if args.fa_target is not None and args.alert_rate is not None:
-        ap.error("use --fa-target or --alert-rate, not both")
+    if sum(a is not None for a in (args.fa_target, args.alert_rate, args.min_rise)) > 1:
+        ap.error("use only one of --fa-target, --alert-rate, --min-rise")
+    if args.min_rise is not None:
+        return run_matched("rise", args.min_rise)
     if args.fa_target is not None:
         return run_matched("fa", args.fa_target)
     if args.alert_rate is not None:
