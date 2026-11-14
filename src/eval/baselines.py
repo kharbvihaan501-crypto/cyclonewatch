@@ -8,6 +8,7 @@
 Run from the project root (VALIDATION only; the test split is never loaded):
     py -3.12 -m src.eval.baselines                  # both baselines, max-F1 threshold
     py -3.12 -m src.eval.baselines --fa-target 1.0  # persistence at ~1 false-alarm episode per storm
+    py -3.12 -m src.eval.baselines --alert-rate 0.20  # persistence at ~20% of over-water rows red
 """
 import argparse
 import datetime as dt
@@ -18,7 +19,8 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import precision_recall_curve
 
-from src.eval.metrics import evaluate, format_table, threshold_for_false_alarms
+from src.eval.metrics import (evaluate, format_table, threshold_for_alert_rate,
+                              threshold_for_false_alarms)
 
 TRAIN_PATH = "data/processed/train.parquet"
 VAL_PATH = "data/processed/val.parquet"
@@ -58,8 +60,12 @@ def choose_threshold(y: np.ndarray, p: np.ndarray) -> float:
     return float(thr[int(np.argmax(f1))])
 
 
-def run_matched_fa(target: float) -> None:
-    """Persistence on validation at the threshold giving ~target false-alarm episodes per storm."""
+def run_matched(mode: str, target: float) -> None:
+    """Persistence on validation at a threshold matched on validation.
+
+    mode "fa":   ~target false-alarm episodes per storm (all basins, over water).
+    mode "rate": ~target share of over-water rows on red (all basins), target as a fraction.
+    """
     train = pd.read_parquet(TRAIN_PATH)
     val = pd.read_parquet(VAL_PATH)
     assert train["SEASON"].max() <= 2015 and val["SEASON"].between(2016, 2019).all()
@@ -67,28 +73,39 @@ def run_matched_fa(target: float) -> None:
     val = val.copy()
     val["P_PERSISTENCE"] = predict_persistence(fit_persistence(train), val)
 
-    thr, fa = threshold_for_false_alarms(val, "P_PERSISTENCE", target)
+    if mode == "fa":
+        thr, got = threshold_for_false_alarms(val, "P_PERSISTENCE", target)
+        label = f"Persistence at ~{target:g} false-alarm episode per storm"
+        achieved = f"achieved {got:.3f} false-alarm episodes per storm"
+        rule = ("the distinct validation probability whose false-alarm episodes per storm "
+                "(all basins, over water) is closest to the target")
+        cmd = f"py -3.12 -m src.eval.baselines --fa-target {target:g}"
+    else:
+        thr, got = threshold_for_alert_rate(val, "P_PERSISTENCE", target)
+        label = f"Persistence at {100 * target:g}% alert rate"
+        achieved = f"achieved alert rate {100 * got:.1f}% of over-water rows"
+        rule = ("the distinct validation probability whose share of over-water rows on red "
+                "(all basins) is closest to the target")
+        cmd = f"py -3.12 -m src.eval.baselines --alert-rate {target:g}"
+
     res = evaluate(val, "P_PERSISTENCE", thr)
-    full = format_table(res)
     keep = ["subset", "storms", "RI episodes", "RI rows rise < 30 kt", "episodes caught",
-            "episodes caught %", "median lead h", "false-alarm episodes / storm",
-            "recall (last-24h rise < 30 kt)", "boot used / skipped"]
-    table = full[keep]
-    label = f"Persistence at ~{target:g} false-alarm episode per storm"
-    head = (f"{label}: threshold {thr:.4f} (chosen on validation, all basins over water; "
-            f"achieved {fa:.3f} false-alarm episodes per storm)")
+            "alert rate %", "red hours / storm", "episodes caught %", "median lead h",
+            "false-alarm episodes / storm", "recall (last-24h rise < 30 kt)", "PR-AUC",
+            "boot used / skipped"]
+    table = format_table(res)[keep]
+    head = f"{label}: threshold {thr:.4f} (chosen on validation, all basins over water; {achieved})"
     print(head)
     print(table.to_string(index=False))
 
-    cmd = f"py -3.12 -m src.eval.baselines --fa-target {target:g}"
     stamp = dt.datetime.now().strftime("%a %d %b %Y %H:%M")
     block = "\n".join([
         f"\n## {stamp}: {label} (VALIDATION 2016-2019)", "",
         f"Command: `{cmd}`", "",
-        "Over-water rows only. Threshold = the distinct validation probability whose false-alarm "
-        "episodes per storm (all basins, over water) is closest to the target; chosen and scored "
-        "on the same validation rows (optimistic). 95% CI: 1,000 storm bootstrap resamples per "
-        f"subset, seed {SEED}; resamples with no RI rows skipped. Test split not loaded.", "",
+        f"Over-water rows only. Threshold = {rule}; chosen and scored on the same validation rows "
+        "(optimistic). Alert rate = share of over-water rows on red; red hours / storm = 6 h x red "
+        "rows / storms. 95% CI: 1,000 storm bootstrap resamples per subset, "
+        f"seed {SEED}; resamples with no RI rows skipped. Test split not loaded.", "",
         f"**{head}**", "", "```", table.to_string(index=False), "```", "",
     ])
     with open(RESULTS_LOG, "a", encoding="utf-8") as f:
@@ -100,9 +117,15 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--fa-target", type=float, default=None,
                     help="run persistence only, at ~this many false-alarm episodes per storm")
+    ap.add_argument("--alert-rate", type=float, default=None,
+                    help="run persistence only, at ~this share (0-1) of over-water rows on red")
     args = ap.parse_args(argv)
+    if args.fa_target is not None and args.alert_rate is not None:
+        ap.error("use --fa-target or --alert-rate, not both")
     if args.fa_target is not None:
-        return run_matched_fa(args.fa_target)
+        return run_matched("fa", args.fa_target)
+    if args.alert_rate is not None:
+        return run_matched("rate", args.alert_rate)
 
     train = pd.read_parquet(TRAIN_PATH)
     val = pd.read_parquet(VAL_PATH)

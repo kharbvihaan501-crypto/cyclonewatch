@@ -84,3 +84,23 @@ All basins, <= 400 km of land     199           57                    96        
 ```
 
 Note: at threshold 0.0190 the persistence alert is red on 86% of validation over-water rows (any storm whose wind fell by less than 10 kt in the last 24 h). False alarms per storm stay near 1 only because red rows merge into long runs. The high catch rate here reflects near-constant alerting, not skill. Check: `py -3.12 -c "...(w.P>=0.0190).mean()..."` (same fit as above) gave 0.86; the lowest DWIND_24 among red rows was -10 kt.
+
+## Sat 14 Nov 2026 15:58: Persistence at 20% alert rate (VALIDATION 2016-2019)
+
+Command: `py -3.12 -m src.eval.baselines --alert-rate 0.2`
+
+Over-water rows only. Threshold = the distinct validation probability whose share of over-water rows on red (all basins) is closest to the target; chosen and scored on the same validation rows (optimistic). Alert rate = share of over-water rows on red; red hours / storm = 6 h x red rows / storms. 95% CI: 1,000 storm bootstrap resamples per subset, seed 0; resamples with no RI rows skipped. Test split not loaded.
+
+**Persistence at 20% alert rate: threshold 0.1285 (chosen on validation, all basins over water; achieved alert rate 18.2% of over-water rows)**
+
+```
+                       subset  storms  RI episodes  RI rows rise < 30 kt  episodes caught      alert rate % red hours / storm episodes caught %  median lead h false-alarm episodes / storm recall (last-24h rise < 30 kt)               PR-AUC boot used / skipped
+                Bay of Bengal      14            6                    12                0  12.8 [2.8, 22.5]   7.7 [1.3, 15.5]    0.0 [0.0, 0.0]       - [-, -]            0.29 [0.07, 0.57]           0.083 [0.000, 0.150] 0.129 [0.059, 0.263]             998 / 2
+           North Indian Ocean      23           11                    24                1  14.3 [7.8, 21.0]  12.8 [6.5, 19.6]   9.1 [0.0, 33.3] 0.0 [0.0, 0.0]            0.43 [0.26, 0.65]           0.208 [0.000, 0.444] 0.154 [0.077, 0.258]            1000 / 0
+All basins, <= 400 km of land     199           57                    96               16 15.9 [12.8, 19.1]   8.4 [6.6, 10.2] 28.1 [17.1, 38.9] 0.0 [0.0, 0.0]            0.36 [0.28, 0.44]           0.177 [0.108, 0.258] 0.121 [0.092, 0.160]            1000 / 0
+                   All basins     323          170                   411               35 18.2 [16.3, 20.1] 18.1 [15.8, 20.5] 20.6 [14.9, 26.2] 0.0 [0.0, 6.0]            0.46 [0.40, 0.54]           0.217 [0.176, 0.260] 0.187 [0.164, 0.211]            1000 / 0
+```
+
+Note: persistence probabilities are steps because DWIND_24 comes in 5 kt steps, so exactly 20% is not reachable. The nearest reachable alert rates on validation over-water rows are 26.8% (threshold 0.1027, DWIND_24 >= 20 kt), 18.2% (threshold 0.1285, DWIND_24 >= 25 kt, used above) and 12.4% (threshold 0.1598, DWIND_24 >= 30 kt).
+
+Decision: models are compared at the same alert rate (20% of over-water rows red) plus PR-AUC. False-alarm episodes per storm alone is not used, because long red runs hide constant alerting.

@@ -29,7 +29,9 @@ SUBSETS = {
 }
 
 METRICS = ["PR-AUC", "precision", "recall", "Brier", "recall (last-24h rise < 30 kt)",
-           "episodes caught %", "median lead h", "false-alarm episodes / storm"]
+           "episodes caught %", "median lead h", "false-alarm episodes / storm",
+           "alert rate %", "red hours / storm"]
+ROW_HOURS = 6  # each row is one 6-hourly time step
 
 
 def _stats(y, p, red, slow, w_rows, ep_caught, ep_lead, w_eps, fa_per_storm, w_storms) -> dict:
@@ -50,6 +52,8 @@ def _stats(y, p, red, slow, w_rows, ep_caught, ep_lead, w_eps, fa_per_storm, w_s
     out["median lead h"] = (np.median(np.repeat(ep_lead[lead_ok], w_eps[lead_ok]))
                             if lead_ok.any() else np.nan)
     out["false-alarm episodes / storm"] = np.average(fa_per_storm, weights=w_storms)
+    out["alert rate %"] = 100 * n_red / w_rows.sum()
+    out["red hours / storm"] = ROW_HOURS * n_red / w_storms.sum()
     return out
 
 
@@ -131,6 +135,20 @@ def threshold_for_false_alarms(df: pd.DataFrame, prob_col: str, target: float = 
     return best[1], best[2]
 
 
+def threshold_for_alert_rate(df: pd.DataFrame, prob_col: str, target: float = 0.20) -> tuple[float, float]:
+    """Threshold whose share of over-water rows on red (all basins, p >= threshold) is closest to target.
+
+    target is a fraction (0.20 = 20%). Candidates are the distinct probabilities,
+    so with tied probabilities the exact target may not be reachable. Ties go to
+    the higher threshold. Use on validation only. Returns (threshold, achieved share).
+    """
+    p = np.sort(df.loc[df["DIST2LAND"] > 0, prob_col].to_numpy())
+    cand = np.unique(p)
+    share = 1 - np.searchsorted(p, cand, side="left") / len(p)  # share of rows with p >= cand
+    i = min(range(len(cand)), key=lambda k: (abs(share[k] - target), -cand[k]))
+    return float(cand[i]), float(share[i])
+
+
 def _fmt(v, nd):
     return "-" if pd.isna(v) else f"{v:.{nd}f}"
 
@@ -139,7 +157,8 @@ def format_table(res: pd.DataFrame) -> pd.DataFrame:
     """Compact text table: 'estimate [lo, hi]' per metric."""
     nd = {"PR-AUC": 3, "precision": 3, "recall": 3, "Brier": 4,
           "recall (last-24h rise < 30 kt)": 3, "episodes caught %": 1,
-          "median lead h": 1, "false-alarm episodes / storm": 2}
+          "median lead h": 1, "false-alarm episodes / storm": 2,
+          "alert rate %": 1, "red hours / storm": 1}
     out = res[["subset", "storms", "rows", "RI rows", "RI rows rise < 30 kt", "RI episodes", "episodes caught",
                "false-alarm episodes"]].copy()
     for m in METRICS:
