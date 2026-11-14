@@ -330,3 +330,79 @@ BASIN      uses t         (BASIN code of the row at t)
 truncation test: 200 random NI validation rows rebuilt from data up to t plus a random fake t+24h row -> all 15 features identical
 ```
 
+
+## Sat 14 Nov 2026 18:25: persistence alert-rate steps and MAIN episode detail, NI (VALIDATION 2016-2019)
+
+Command: `.venv\Scripts\python -m src.eval.ni_report`
+
+NI over-water validation rows only. Saved models read from models/ (no retraining); persistence = logistic regression on DWIND_24 fitted on train (src/eval/baselines.py). LightGBM thresholds from threshold_for_alert_rate(NI validation, prob, 0.182). Test split not loaded.
+
+Persistence alert-rate steps around MAIN's alert rate:
+
+```
+MAIN (NI-ONLY) threshold 0.0999 -> alert rate 18.13% of NI over-water validation rows
+persistence step below: threshold 0.1285 (DWIND_24 >= 25 kt) -> alert rate 14.33%
+persistence step above: threshold 0.1027 (DWIND_24 >= 20 kt) -> alert rate 26.61%   <- added to the tables
+```
+
+North Indian Ocean (persistence added at the step above):
+
+```
+               NI-ONLY (MAIN) ALL-BASINS LEAVE-NI-OUT persistence @ 26.6%
+threshold              0.0999     0.1843       0.1860              0.1027
+PR-AUC                  0.316      0.256        0.253               0.154
+ROC AUC                 0.846      0.794        0.782               0.739
+Brier                  0.0671     0.0701       0.0700              0.0752
+mean predicted         0.0742     0.0954       0.0999              0.0753
+actual RI rate         0.0819     0.0819       0.0819              0.0819
+alert rate %             18.1       18.1         18.1                26.6
+caught                2 of 11    1 of 11      2 of 11             2 of 11
+hard recall             0.375      0.292        0.292               0.375
+FA eps/storm             0.96       0.96         0.91                0.83
+storms                     23         23           23                  23
+RI episodes                11         11           11                  11
+```
+
+Bay of Bengal subset (same thresholds):
+
+```
+               NI-ONLY (MAIN) ALL-BASINS LEAVE-NI-OUT persistence @ 26.6%
+threshold              0.0999     0.1843       0.1860              0.1027
+PR-AUC                  0.376      0.327        0.347               0.129
+ROC AUC                 0.817      0.749        0.737               0.623
+Brier                  0.0725     0.0747       0.0768              0.0863
+mean predicted         0.0774     0.1024       0.1070              0.0784
+actual RI rate         0.0922     0.0922       0.0922              0.0922
+alert rate %             21.3       18.4         16.3                23.4
+caught                 1 of 6     1 of 6       1 of 6              0 of 6
+hard recall             0.500      0.417        0.417               0.167
+FA eps/storm             0.71       0.57         0.64                0.64
+storms                     14         14           14                  14
+RI episodes                 6          6            6                   6
+```
+
+MAIN (NI-ONLY) at threshold 0.0999: 2 caught of 11 RI episodes. Lead time = hours from the start of the unbroken red run to the episode's first row (0 h = red only at the first RI row), as in src/eval/episodes.py. P_AT_START = MAIN probability at the episode's first row; MAX_P_BEFORE_END = highest MAIN probability in that storm up to the episode's end.
+
+Caught:
+
+```
+       NAME  SEASON           SID SUBBASIN            START              END  N_ROWS  P_AT_START  LEAD_H
+       MORA    2017 2017147N14087       BB 2017-05-29 00:00 2017-05-29 00:00       1       0.146     6.0
+KYAAR:KYARR    2019 2019296N15066       AS 2019-10-25 06:00 2019-10-26 12:00       6       0.235     6.0
+```
+
+Missed:
+
+```
+        NAME  SEASON           SID SUBBASIN            START              END  N_ROWS  P_AT_START  MAX_P_BEFORE_END
+       TITLI    2018 2018281N14088       BB 2018-10-09 06:00 2018-10-10 00:00       4       0.080             0.672
+        GAJA    2018 2018314N12093       BB 2018-11-14 18:00 2018-11-14 18:00       1       0.044             0.119
+        FANI    2019 2019116N02090       BB 2019-04-29 00:00 2019-04-29 18:00       4       0.058             0.388
+        FANI    2019 2019116N02090       BB 2019-05-01 12:00 2019-05-01 18:00       2       0.037             0.388
+        VAYU    2019 2019160N11073       AS 2019-06-10 18:00 2019-06-11 06:00       3       0.081             0.201
+ HIKAA:HIKKA    2019 2019264N19071       AS 2019-09-23 00:00 2019-09-23 06:00       2       0.051             0.051
+ KYAAR:KYARR    2019 2019296N15066       AS 2019-10-24 18:00 2019-10-24 18:00       1       0.072             0.072
+        MAHA    2019 2019301N05081       AS 2019-11-02 18:00 2019-11-03 06:00       3       0.049             0.266
+BULBUL:MATMO    2019 2019302N11118       BB 2019-11-07 06:00 2019-11-07 06:00       1       0.055             0.141
+```
+
