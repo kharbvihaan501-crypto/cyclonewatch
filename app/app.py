@@ -5,8 +5,10 @@ to check the same model against what actually happened.
 
 Model: models/ri_lgbm.txt (LightGBM) if it exists, else the persistence baseline
 (logistic regression on the last-24h wind change) fitted on the train split.
+LightGBM probabilities are Platt-calibrated with models/ri_calibration.json when that
+file exists and was fitted for the same model file; otherwise raw probabilities are shown.
 The red-alert threshold is set on the VALIDATION split so that ALERT_RATE of
-over-water validation rows are red. The test split is never loaded here.
+North Indian Ocean (BASIN NI) over-water validation rows are red. The test split is never loaded here.
 
 Run from the project root:  py -3.12 app\\app.py
 """
@@ -28,10 +30,13 @@ from src.data.features import (BASINS, FEATURES, RI_THRESHOLD_KT,  # noqa: E402
 from src.eval.baselines import TRAIN_PATH, VAL_PATH, fit_persistence  # noqa: E402
 from src.eval.episodes import episode_alerts  # noqa: E402
 from src.eval.metrics import threshold_for_alert_rate  # noqa: E402
+from src.models.ri_model import apply_platt  # noqa: E402
 
-ALERT_RATE = 0.20  # red threshold = the one that makes 20% of over-water validation rows red
+ALERT_RATE = 0.20  # red threshold = the one that makes 20% of NI over-water validation rows red
+THRESHOLD_BASIN = "NI"  # the main model is trained and checked on the North Indian Ocean only
 AMBER_SHARE = 0.75  # amber from 75% of the red threshold
 MODEL_PATH = Path(os.environ.get("CYCLONEWATCH_MODEL", ROOT / "models" / "ri_lgbm.txt"))
+CAL_PATH = MODEL_PATH.with_name("ri_calibration.json")
 TRACKS_PATH = ROOT / "data" / "processed" / "tracks.parquet"
 DEFAULT_STORM = ("AMPHAN", 2020)
 TITLE = "CycloneWatch: will this cyclone suddenly strengthen in the next 24 hours?"
@@ -117,19 +122,28 @@ class Model:
             missing = set(self.cols) - set(FEATURES)
             assert not missing, f"model uses features the app does not build: {missing}"
             self.name = f"LightGBM ({MODEL_PATH.name})"
+            self.cal = None
+            if CAL_PATH.exists():
+                import json
+                cal = json.loads(CAL_PATH.read_text(encoding="utf-8"))
+                if Path(cal["model_file"]).name == MODEL_PATH.name:
+                    self.cal = cal
+                    self.name += ", Platt-calibrated on 2016-2019 validation storms"
         else:
             self.booster = None
             self.pers = fit_persistence(pd.read_parquet(TRAIN_PATH))
             self.name = ("Persistence baseline (last-24h wind change only, fitted on 1980-2015). "
                          f"Trained model {MODEL_PATH.as_posix().replace(ROOT.as_posix() + '/', '')} not found.")
         val = pd.read_parquet(VAL_PATH)  # validation only, for the threshold
+        val = val[val["BASIN"] == THRESHOLD_BASIN].copy()
         val["P"] = self.predict(val)
         self.threshold, self.val_rate = threshold_for_alert_rate(val, "P", ALERT_RATE)
         self.amber_from = AMBER_SHARE * self.threshold
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         if self.booster is not None:
-            return self.booster.predict(X[self.cols])
+            p = self.booster.predict(X[self.cols])
+            return apply_platt(p, self.cal["a"], self.cal["b"]) if self.cal else p
         return self.pers.predict_proba(X[["DWIND_24"]].to_numpy())[:, 1]
 
     def reasons(self, X: pd.DataFrame) -> list[str]:
@@ -165,8 +179,8 @@ MODEL = Model()
 
 def model_line() -> str:
     return (f"**Model in use:** {MODEL.name}  \nRed alert at probability ≥ {MODEL.threshold:.3f}, "
-            f"amber from {MODEL.amber_from:.3f} (threshold set on 2016-2019 validation storms so that "
-            f"{MODEL.val_rate:.0%} of over-water forecasts are red).")
+            f"amber from {MODEL.amber_from:.3f} (threshold set on 2016-2019 North Indian Ocean validation "
+            f"storms so that {MODEL.val_rate:.0%} of their over-water forecasts are red).")
 
 
 def alert_html(p: float, lvl: str) -> str:
