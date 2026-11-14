@@ -37,6 +37,9 @@ from src.eval.episodes import episode_alerts  # noqa: E402
 from src.eval.metrics import threshold_for_alert_rate  # noqa: E402
 from src.models.ri_model import apply_platt  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # app/ helper modules
+from odisha_places import COASTAL_KM, exposure_rows  # noqa: E402
+
 ALERT_RATE = 0.20  # red threshold = the one that makes 20% of NI over-water validation rows red
 THRESHOLD_BASIN = "NI"  # the main model is trained and checked on the North Indian Ocean only
 AMBER_SHARE = 0.5  # amber from half of the red threshold (CLAUDE.md, docs/freeze.md)
@@ -359,6 +362,10 @@ DEMO_FIRST = [("AMPHAN", 2020), ("DANA", 2024), ("YAAS", 2021), ("GULAB", 2021),
 SUCCESS_CASE = ("AMPHAN", 2020)
 FALSE_ALARM_CASE = ("DANA", 2024)
 BOB_VIEW = dict(lat=(6.0, 23.5), lon=(79.0, 97.0))  # Bay of Bengal (must stay in view)
+# Label positions so the close-together Odisha towns do not overlap on the map.
+TOWN_LABEL_POS = {"Puri": "bottom center", "Bhubaneswar": "middle left", "Cuttack": "top right",
+                  "Paradip": "middle right", "Gopalpur": "middle left", "Balasore": "middle right",
+                  "Angul": "bottom left", "Keonjhar": "top center"}
 MAP_ASPECT = 1.93  # map box width / height at 70vh on a 16:9 laptop window (measured in the browser)
 
 
@@ -514,6 +521,16 @@ def make_map(s: pd.DataFrame, i: int, reveal: bool, extra=None) -> go.Figure:
     if extra is not None:
         extra(fig)
     now = s.iloc[i]
+    for coastal, sym, nm in ((True, "square", f"Odisha town, coastal (≤ {COASTAL_KM:.0f} km)"),
+                             (False, "square-open", "Odisha town, inland")):
+        tw = [r for r in exposure_rows(float(now["LAT"]), float(now["LON"])) if r["coastal"] == coastal]
+        fig.add_trace(go.Scattergeo(
+            lat=[r["lat"] for r in tw], lon=[r["lon"] for r in tw], mode="markers+text", name=nm,
+            text=[r["town"] for r in tw], textposition=[TOWN_LABEL_POS.get(r["town"], "middle left") for r in tw],
+            textfont=dict(size=11, color="#222"),
+            marker=dict(symbol=sym, size=8, color="#222", line=dict(width=1.5, color="#222")),
+            hovertext=[f"{r['town']}: ~{r['coast_km']:.0f} km from coast, {r['storm_km']:.0f} km from "
+                       f"storm centre" for r in tw], hoverinfo="text"))
     fig.add_trace(go.Scattergeo(lat=[float(now["LAT"])], lon=[float(now["LON"])], mode="markers",
                                 name="chosen time", hoverinfo="skip",
                                 marker=dict(size=20, color="rgba(0,0,0,0)",
@@ -624,6 +641,27 @@ def outcome_md(s: pd.DataFrame, eps: pd.DataFrame, fa: int, i: int, reveal: bool
     return "\n\n".join(lines)
 
 
+def exposure_html(s: pd.DataFrame, i: int) -> str:
+    """Coastal exposure (illustrative): towns by distance from the storm centre at the chosen time."""
+    r = s.iloc[i]
+    rows = exposure_rows(float(r["LAT"]), float(r["LON"]))
+    body = "".join(
+        f"<tr><td><b>{x['town']}</b></td><td style='text-align:right'>~{x['coast_km']:.0f}</td>"
+        f"<td style='text-align:right'>{x['storm_km']:.0f}</td>"
+        f"<td>{'Coastal' if x['coastal'] else 'Inland'}: {x['note']}</td></tr>" for x in rows)
+    return (f"<div style='border:1px solid #ccc;border-radius:10px;padding:10px 14px'>"
+            f"<div style='font-size:17px;font-weight:800'>Coastal exposure (illustrative)</div>"
+            f"<div style='font-size:13px;font-weight:700;color:#8a5a00'>Illustrative only. Based on distance, "
+            f"not a forecast. Does not model storm surge or flooding.</div>"
+            f"<div style='font-size:12px;margin:2px 0 6px'>Storm centre at {r['ISO_TIME']:%d %b %Y %H:%M} UTC "
+            f"({r['LAT']:.1f}°N, {r['LON']:.1f}°E). Coastal = within {COASTAL_KM:.0f} km of the coast. Town "
+            f"positions and the coastline are approximate (a few km).</div>"
+            f"<table style='width:100%;border-collapse:collapse;font-size:14px'>"
+            f"<tr style='text-align:left;border-bottom:1px solid #ccc'><th>Town</th>"
+            f"<th style='text-align:right'>From coast (km)</th><th style='text-align:right'>From storm "
+            f"centre (km)</th><th>Exposure</th></tr>{body}</table></div>")
+
+
 def label_html(sid: str) -> str:
     season = SEASON_OF[sid]
     return (f"<div style='border-left:5px solid #1d3557;padding:6px 12px;background:rgba(29,53,87,0.06)'>"
@@ -635,7 +673,7 @@ def render(sid: str, i: float, reveal: bool):
     s, eps, fa = storm_view(sid)
     i = int(min(max(i, 0), len(s) - 1))
     return (make_map(s, i, reveal), make_chart(s, eps, i, reveal), now_panel(s, i),
-            outcome_md(s, eps, fa, i, reveal), label_html(sid))
+            outcome_md(s, eps, fa, i, reveal), label_html(sid), exposure_html(s, i))
 
 
 def time_label(s: pd.DataFrame) -> str:
@@ -708,9 +746,10 @@ def build() -> gr.Blocks:
                     with gr.Column(scale=1, min_width=260):
                         reveal_btn = gr.Button("Reveal what happened next", variant="primary")
                         outcome = gr.Markdown(v0[3])
+                exposure = gr.HTML(v0[5])
                 gr.Markdown(f"**{DISCLAIMER}**")
                 revealed = gr.State(False)
-                outs = [fmap, chart, panel, outcome, label]
+                outs = [fmap, chart, panel, outcome, label, exposure]
                 storm.change(on_storm, storm, [t, revealed, *outs])
                 t.change(on_time, [storm, t], [revealed, *outs])
                 reveal_btn.click(on_reveal, [storm, t], [revealed, *outs])
