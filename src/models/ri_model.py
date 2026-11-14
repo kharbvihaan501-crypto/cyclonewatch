@@ -49,7 +49,7 @@ RESULTS_LOG = "docs/results_log.md"
 CMD = r".venv\Scripts\python -m src.models.ri_model"
 
 SEED = 0
-ALERT_RATE = 0.182
+ALERT_RATE = 0.20
 PARAMS = {
     "objective": "binary",
     "metric": "binary_logloss",

@@ -31,7 +31,7 @@ VAL_PATH = "data/processed/val.parquet"
 META_PATH = "models/ri_lgbm_features.json"
 RESULTS_LOG = "docs/results_log.md"
 CMD = r".venv\Scripts\python -m src.eval.ni_report"
-ALERT_RATE = 0.182  # same call as in src/models/ri_model.py; achieves 18.1% on NI rows
+ALERT_RATE = 0.20  # same call as in src/models/ri_model.py; achieves 19.9% on NI rows
 SUBSETS = ["North Indian Ocean", "Bay of Bengal"]
 BOB = lambda d: (d["BASIN"] == "NI") & (d["SUBBASIN"] == "BB")  # noqa: E731
 
