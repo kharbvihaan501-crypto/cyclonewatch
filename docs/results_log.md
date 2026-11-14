@@ -66,3 +66,21 @@ All basins, <= 400 km of land     199      120                    96         0.5
 ```
 
 Climatology is a floor: one constant per basin; report its PR-AUC only, not episodes caught.
+
+## Sat 14 Nov 2026 15:55: Persistence at ~1 false-alarm episode per storm (VALIDATION 2016-2019)
+
+Command: `py -3.12 -m src.eval.baselines --fa-target 1`
+
+Over-water rows only. Threshold = the distinct validation probability whose false-alarm episodes per storm (all basins, over water) is closest to the target; chosen and scored on the same validation rows (optimistic). 95% CI: 1,000 storm bootstrap resamples per subset, seed 0; resamples with no RI rows skipped. Test split not loaded.
+
+**Persistence at ~1 false-alarm episode per storm: threshold 0.0190 (chosen on validation, all basins over water; achieved 1.003 false-alarm episodes per storm)**
+
+```
+                       subset  storms  RI episodes  RI rows rise < 30 kt  episodes caught    episodes caught %    median lead h false-alarm episodes / storm recall (last-24h rise < 30 kt) boot used / skipped
+                Bay of Bengal      14            6                    12                6 100.0 [100.0, 100.0] 42.0 [0.0, 72.0]            0.64 [0.36, 0.93]           1.000 [1.000, 1.000]             998 / 2
+           North Indian Ocean      23           11                    24               11 100.0 [100.0, 100.0] 18.0 [0.0, 54.0]            0.96 [0.65, 1.35]           1.000 [1.000, 1.000]            1000 / 0
+All basins, <= 400 km of land     199           57                    96               55   96.5 [91.2, 100.0]   0.0 [0.0, 6.0]            1.21 [1.10, 1.33]           0.969 [0.919, 1.000]            1000 / 0
+                   All basins     323          170                   411              164    96.5 [93.3, 99.3]  9.0 [6.0, 18.0]            1.00 [0.92, 1.08]           0.978 [0.960, 0.993]            1000 / 0
+```
+
+Note: at threshold 0.0190 the persistence alert is red on 86% of validation over-water rows (any storm whose wind fell by less than 10 kt in the last 24 h). False alarms per storm stay near 1 only because red rows merge into long runs. The high catch rate here reflects near-constant alerting, not skill. Check: `py -3.12 -c "...(w.P>=0.0190).mean()..."` (same fit as above) gave 0.86; the lowest DWIND_24 among red rows was -10 kt.

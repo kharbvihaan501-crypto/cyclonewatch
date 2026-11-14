@@ -6,8 +6,10 @@
   missing from training falls back to the overall training rate.
 
 Run from the project root (VALIDATION only; the test split is never loaded):
-    py -3.12 -m src.eval.baselines
+    py -3.12 -m src.eval.baselines                  # both baselines, max-F1 threshold
+    py -3.12 -m src.eval.baselines --fa-target 1.0  # persistence at ~1 false-alarm episode per storm
 """
+import argparse
 import datetime as dt
 import sys
 
@@ -16,7 +18,7 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import precision_recall_curve
 
-from src.eval.metrics import evaluate, format_table
+from src.eval.metrics import evaluate, format_table, threshold_for_false_alarms
 
 TRAIN_PATH = "data/processed/train.parquet"
 VAL_PATH = "data/processed/val.parquet"
@@ -56,7 +58,52 @@ def choose_threshold(y: np.ndarray, p: np.ndarray) -> float:
     return float(thr[int(np.argmax(f1))])
 
 
-def main() -> None:
+def run_matched_fa(target: float) -> None:
+    """Persistence on validation at the threshold giving ~target false-alarm episodes per storm."""
+    train = pd.read_parquet(TRAIN_PATH)
+    val = pd.read_parquet(VAL_PATH)
+    assert train["SEASON"].max() <= 2015 and val["SEASON"].between(2016, 2019).all()
+    assert not set(train["SID"]) & set(val["SID"]), "SID in both train and val"
+    val = val.copy()
+    val["P_PERSISTENCE"] = predict_persistence(fit_persistence(train), val)
+
+    thr, fa = threshold_for_false_alarms(val, "P_PERSISTENCE", target)
+    res = evaluate(val, "P_PERSISTENCE", thr)
+    full = format_table(res)
+    keep = ["subset", "storms", "RI episodes", "RI rows rise < 30 kt", "episodes caught",
+            "episodes caught %", "median lead h", "false-alarm episodes / storm",
+            "recall (last-24h rise < 30 kt)", "boot used / skipped"]
+    table = full[keep]
+    label = f"Persistence at ~{target:g} false-alarm episode per storm"
+    head = (f"{label}: threshold {thr:.4f} (chosen on validation, all basins over water; "
+            f"achieved {fa:.3f} false-alarm episodes per storm)")
+    print(head)
+    print(table.to_string(index=False))
+
+    cmd = f"py -3.12 -m src.eval.baselines --fa-target {target:g}"
+    stamp = dt.datetime.now().strftime("%a %d %b %Y %H:%M")
+    block = "\n".join([
+        f"\n## {stamp}: {label} (VALIDATION 2016-2019)", "",
+        f"Command: `{cmd}`", "",
+        "Over-water rows only. Threshold = the distinct validation probability whose false-alarm "
+        "episodes per storm (all basins, over water) is closest to the target; chosen and scored "
+        "on the same validation rows (optimistic). 95% CI: 1,000 storm bootstrap resamples per "
+        f"subset, seed {SEED}; resamples with no RI rows skipped. Test split not loaded.", "",
+        f"**{head}**", "", "```", table.to_string(index=False), "```", "",
+    ])
+    with open(RESULTS_LOG, "a", encoding="utf-8") as f:
+        f.write(block + "\n")
+    print(f"\n[appended to {RESULTS_LOG}]")
+
+
+def main(argv: list[str] | None = None) -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--fa-target", type=float, default=None,
+                    help="run persistence only, at ~this many false-alarm episodes per storm")
+    args = ap.parse_args(argv)
+    if args.fa_target is not None:
+        return run_matched_fa(args.fa_target)
+
     train = pd.read_parquet(TRAIN_PATH)
     val = pd.read_parquet(VAL_PATH)
     assert train["SEASON"].max() <= 2015 and val["SEASON"].between(2016, 2019).all()

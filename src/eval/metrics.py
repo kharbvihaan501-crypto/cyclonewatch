@@ -112,6 +112,25 @@ def evaluate(df: pd.DataFrame, prob_col: str, threshold: float, seed: int = SEED
     return pd.DataFrame(rows)
 
 
+def threshold_for_false_alarms(df: pd.DataFrame, prob_col: str, target: float = 1.0) -> tuple[float, float]:
+    """Threshold whose false-alarm episodes per storm (all basins, over water) is closest to target.
+
+    Scans every distinct probability as a candidate (use on validation only).
+    False alarms per storm need not be monotonic in the threshold, so this is a
+    full scan, not a bisection. Ties go to the higher threshold (fewer alerts).
+    Returns (threshold, achieved false-alarm episodes per storm).
+    """
+    water = df[df["DIST2LAND"] > 0]
+    best = None
+    for thr in np.unique(water[prob_col].to_numpy()):
+        _, storms = episode_alerts(water, prob_col, thr)
+        fa = storms["N_FALSE_ALARMS"].mean()
+        key = (abs(fa - target), -thr)
+        if best is None or key < best[0]:
+            best = (key, float(thr), float(fa))
+    return best[1], best[2]
+
+
 def _fmt(v, nd):
     return "-" if pd.isna(v) else f"{v:.{nd}f}"
 
