@@ -91,6 +91,7 @@ def _subset_eval(d: pd.DataFrame, prob_col: str, threshold: float, rng) -> dict:
     res = {"storms": n, "rows": len(d), "RI rows": int(y.sum()),
            "RI rows rise < 30 kt": int(((y == 1) & slow).sum()),
            "RI episodes": len(eps), "episodes caught": int(ep_caught.sum()),
+           "missed episodes": int((~ep_caught).sum()),
            "false-alarm episodes": int(fa.sum())}
     for m in METRICS:
         res[m] = point[m]
@@ -170,6 +171,7 @@ def format_table(res: pd.DataFrame) -> pd.DataFrame:
           "median lead h": 1, "false-alarm episodes / storm": 2,
           "alert rate %": 1, "red hours / storm": 1}
     out = res[["subset", "storms", "rows", "RI rows", "RI rows rise < 30 kt", "RI episodes", "episodes caught",
+               "missed episodes",
                "false-alarm episodes"]].copy()
     for m in METRICS:
         out[m] = [f"{_fmt(e, nd[m])} [{_fmt(lo, nd[m])}, {_fmt(hi, nd[m])}]"
