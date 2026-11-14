@@ -135,14 +135,24 @@ def threshold_for_false_alarms(df: pd.DataFrame, prob_col: str, target: float = 
     return best[1], best[2]
 
 
-def threshold_for_alert_rate(df: pd.DataFrame, prob_col: str, target: float = 0.20) -> tuple[float, float]:
-    """Threshold whose share of over-water rows on red (all basins, p >= threshold) is closest to target.
+ALERT_BASIN = "NI"  # logged rule: 20% of over-water VALIDATION rows red, BASIN == NI only
 
-    target is a fraction (0.20 = 20%). Candidates are the distinct probabilities,
-    so with tied probabilities the exact target may not be reachable. Ties go to
-    the higher threshold. Use on validation only. Returns (threshold, achieved share).
+
+def threshold_for_alert_rate(df: pd.DataFrame, prob_col: str, target: float = 0.20,
+                             basin: str | None = ALERT_BASIN) -> tuple[float, float]:
+    """Threshold whose share of over-water rows on red (p >= threshold) is closest to target.
+
+    Rows used: DIST2LAND > 0 and, unless basin is None, BASIN == basin (default NI,
+    the logged rule). target is a fraction (0.20 = 20%). Candidates are the distinct
+    probabilities, so with tied probabilities the exact target may not be reachable
+    (persistence moves in steps). Ties go to the higher threshold. Use on validation
+    only. Returns (threshold, achieved share on those rows).
     """
-    p = np.sort(df.loc[df["DIST2LAND"] > 0, prob_col].to_numpy())
+    rows = df["DIST2LAND"] > 0
+    if basin is not None:
+        rows &= (df["BASIN"].astype(str) == basin)
+    assert rows.any(), f"no over-water rows for basin {basin}"
+    p = np.sort(df.loc[rows, prob_col].to_numpy())
     cand = np.unique(p)
     share = 1 - np.searchsorted(p, cand, side="left") / len(p)  # share of rows with p >= cand
     i = min(range(len(cand)), key=lambda k: (abs(share[k] - target), -cand[k]))

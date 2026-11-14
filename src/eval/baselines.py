@@ -8,7 +8,7 @@
 Run from the project root (VALIDATION only; the test split is never loaded):
     py -3.12 -m src.eval.baselines                  # both baselines, max-F1 threshold
     py -3.12 -m src.eval.baselines --fa-target 1.0  # persistence at ~1 false-alarm episode per storm
-    py -3.12 -m src.eval.baselines --alert-rate 0.20  # persistence at ~20% of over-water rows red
+    py -3.12 -m src.eval.baselines --alert-rate 0.20  # persistence at ~20% of NI over-water validation rows red
 """
 import argparse
 import datetime as dt
@@ -19,7 +19,7 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import precision_recall_curve
 
-from src.eval.metrics import (evaluate, format_table, threshold_for_alert_rate,
+from src.eval.metrics import (ALERT_BASIN, evaluate, format_table, threshold_for_alert_rate,
                               threshold_for_false_alarms)
 
 TRAIN_PATH = "data/processed/train.parquet"
@@ -64,7 +64,7 @@ def run_matched(mode: str, target: float) -> None:
     """Persistence on validation at a threshold matched on validation.
 
     mode "fa":   ~target false-alarm episodes per storm (all basins, over water).
-    mode "rate": ~target share of over-water rows on red (all basins), target as a fraction.
+    mode "rate": ~target share of over-water BASIN == NI rows on red (logged rule), target as a fraction.
     """
     train = pd.read_parquet(TRAIN_PATH)
     val = pd.read_parquet(VAL_PATH)
@@ -81,11 +81,12 @@ def run_matched(mode: str, target: float) -> None:
                 "(all basins, over water) is closest to the target")
         cmd = f"py -3.12 -m src.eval.baselines --fa-target {target:g}"
     else:
-        thr, got = threshold_for_alert_rate(val, "P_PERSISTENCE", target)
-        label = f"Persistence at {100 * target:g}% alert rate"
-        achieved = f"achieved alert rate {100 * got:.1f}% of over-water rows"
-        rule = ("the distinct validation probability whose share of over-water rows on red "
-                "(all basins) is closest to the target")
+        thr, got = threshold_for_alert_rate(val, "P_PERSISTENCE", target, basin=ALERT_BASIN)
+        label = f"Persistence, {ALERT_BASIN} {100 * target:g}% rule"
+        achieved = (f"actual alert rate {100 * got:.1f}% of {ALERT_BASIN} over-water validation rows, "
+                    f"the closest step persistence can reach")
+        rule = (f"the distinct validation probability whose share of over-water BASIN == {ALERT_BASIN} "
+                "rows on red is closest to the target (logged alert threshold rule)")
         cmd = f"py -3.12 -m src.eval.baselines --alert-rate {target:g}"
 
     res = evaluate(val, "P_PERSISTENCE", thr)
@@ -94,7 +95,8 @@ def run_matched(mode: str, target: float) -> None:
             "false-alarm episodes / storm", "recall (last-24h rise < 30 kt)", "PR-AUC",
             "boot used / skipped"]
     table = format_table(res)[keep]
-    head = f"{label}: threshold {thr:.4f} (chosen on validation, all basins over water; {achieved})"
+    where = "all basins" if mode == "fa" else f"BASIN == {ALERT_BASIN}"
+    head = f"{label}: threshold {thr:.4f} (chosen on validation, {where} over water; {achieved})"
     print(head)
     print(table.to_string(index=False))
 
