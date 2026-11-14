@@ -1,0 +1,4 @@
+split,seasons,storms,rows,RI rows,RI rows over water,storms with RI
+train,1980-2015,102,1358,84,84,20
+val,2016-2019,16,208,14,14,5
+test,2020-on,21,252,19,19,3
