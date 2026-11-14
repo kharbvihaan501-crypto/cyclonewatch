@@ -49,15 +49,6 @@ PRED_PATH = Path(os.environ.get("CYCLONEWATCH_PREDICTIONS",
 FREEZE_MD = ROOT / "docs" / "freeze.md"
 PERS_RED = 0.1285  # frozen persistence threshold (docs/freeze.md): red when last-24h rise >= 25 kt
 DEFAULT_STORM = ("AMPHAN", 2020)
-# Odisha casebook (CLAUDE.md). SIDs checked in tracks.parquet; the 1999 storm is UNNAMED there.
-CASEBOOK = [("1999 super cyclone", "1999298N12099"), ("Phailin 2013", "2013281N12098"),
-            ("Hudhud 2014", "2014279N11096"), ("Titli 2018", "2018281N14088"),
-            ("Fani 2019", "2019116N02090"), ("Bulbul 2019", "2019302N11118"),
-            ("Amphan 2020", "2020136N10088"), ("Yaas 2021", "2021143N15090"),
-            ("Gulab 2021", "2021267N18094"), ("Jawad 2021", "2021335N08096"),
-            ("Dana 2024", "2024295N15092")]
-CASEBOOK_NOTE = ("Montha 2025 is not shown: its data is provisional (US-PROVISIONAL), so cleaning "
-                 "rule 2 dropped it.")
 TITLE = "CycloneWatch: will this cyclone suddenly strengthen in the next 24 hours?"
 DISCLAIMER = ("Prototype for research and education. Not an official forecast. "
               "Always follow IMD and your state disaster authority.")
@@ -154,6 +145,25 @@ def _load_lgbm():
     return booster, spec
 
 
+def _freeze_record() -> dict:
+    """From docs/freeze.md: SHA-256 of models/ri_lgbm.txt, MAIN red threshold and its NI val alert rate."""
+    out = {"sha": None, "thr": None, "rate": None}
+    if not FREEZE_MD.exists():
+        return out
+    txt = FREEZE_MD.read_text(encoding="utf-8")
+    sha = re.search(r"`models/ri_lgbm\.txt`[^|]*\|\s*`([0-9a-f]{64})`", txt)
+    row = re.search(r"\|\s*NI-ONLY \(MAIN\)\s*\|[^|]*\|\s*([0-9.]+)\s*\|[^|]*\|\s*([0-9.]+)%", txt)
+    if sha:
+        out["sha"] = sha.group(1)
+    if row:
+        out["thr"], out["rate"] = float(row.group(1)), float(row.group(2)) / 100
+    return out
+
+
+FREEZE = _freeze_record()
+PERS_VAL_RATE = 0.143  # docs/freeze.md: persistence at 0.1285 puts 14.3% of NI over-water validation rows red
+
+
 class Model:
     """LightGBM from MODEL_PATH + FEATURES_JSON; if either is missing or fails to load,
     persistence fitted on train, with a console warning and a red banner (never silent)."""
@@ -191,10 +201,23 @@ class Model:
             self.pers = fit_persistence(pd.read_parquet(TRAIN_PATH))
             self.short = "persistence baseline (model file missing)"
             self.name = "Persistence baseline (last-24h wind change only, fitted on 1980-2015)"
-        val = pd.read_parquet(VAL_PATH)  # validation only, for the threshold
-        val = val[val["BASIN"] == THRESHOLD_BASIN].copy()
-        val["P"] = self.predict(val)
-        self.threshold, self.val_rate = threshold_for_alert_rate(val, "P", ALERT_RATE)
+        # Thresholds come from docs/freeze.md (no data read). Only a model file that does not match
+        # the frozen SHA-256 gets its threshold recomputed from validation, with a warning.
+        self.sha = hashlib.sha256(MODEL_PATH.read_bytes()).hexdigest() if self.kind == "lgbm" else None
+        self.is_frozen = self.sha is not None and self.sha == FREEZE["sha"] and FREEZE["thr"] is not None
+        if self.kind == "persistence":
+            self.threshold, self.val_rate, self.thr_source = PERS_RED, PERS_VAL_RATE, "docs/freeze.md (persistence)"
+        elif self.is_frozen:
+            self.threshold, self.val_rate, self.thr_source = FREEZE["thr"], FREEZE["rate"], "docs/freeze.md"
+        else:
+            print(f"WARNING: {_rel(MODEL_PATH)} does not match the SHA-256 in docs/freeze.md (or freeze.md "
+                  "is missing): recomputing its threshold from val.parquet; it is NOT the frozen model.",
+                  file=sys.stderr, flush=True)
+            val = pd.read_parquet(VAL_PATH)
+            val = val[val["BASIN"] == THRESHOLD_BASIN].copy()
+            val["P"] = self.predict(val)
+            self.threshold, self.val_rate = threshold_for_alert_rate(val, "P", ALERT_RATE)
+            self.thr_source = "recomputed from val.parquet (model NOT frozen)"
         self.amber_from = AMBER_SHARE * self.threshold
 
     def matrix(self, X: pd.DataFrame) -> pd.DataFrame:
@@ -266,35 +289,18 @@ def banner_html() -> str:
             f"<div style='color:#ffffff !important;font-size:12px;opacity:0.92'>{sub}</div></div>")
 
 
-def _freeze_record() -> tuple[str | None, float | None]:
-    """(SHA-256 of models/ri_lgbm.txt, MAIN red threshold) as written in docs/freeze.md, or Nones."""
-    if not FREEZE_MD.exists():
-        return None, None
-    txt = FREEZE_MD.read_text(encoding="utf-8")
-    sha = re.search(r"`models/ri_lgbm\.txt`[^|]*\|\s*`([0-9a-f]{64})`", txt)
-    thr = re.search(r"\|\s*NI-ONLY \(MAIN\)\s*\|[^|]*\|\s*([0-9.]+)\s*\|", txt)
-    return (sha.group(1) if sha else None), (float(thr.group(1)) if thr else None)
-
-
-FROZEN_SHA, FROZEN_THR = _freeze_record()
-MODEL_SHA = (hashlib.sha256(MODEL_PATH.read_bytes()).hexdigest()
-             if MODEL.kind == "lgbm" else None)
-IS_FROZEN = MODEL_SHA is not None and MODEL_SHA == FROZEN_SHA
-if MODEL.kind == "lgbm" and not IS_FROZEN:
-    print(f"WARNING: {_rel(MODEL_PATH)} does not match the SHA-256 in docs/freeze.md "
-          "(or freeze.md is missing); it is NOT labelled as the frozen test model.", file=sys.stderr)
+IS_FROZEN = MODEL.is_frozen
 
 
 def model_line() -> str:
     """Threshold and the alert-rate rule, shown under the banner."""
-    line = (f"**Alert threshold:** red at probability ≥ {MODEL.threshold:.3f}, amber from "
-            f"{MODEL.amber_from:.3f} (half of red). **Rule:** {ALERT_RATE:.0%} of {THRESHOLD_BASIN} "
-            f"over-water validation rows (2016-2019) red; this model reaches {MODEL.val_rate:.1%} on those rows.")
+    line = (f"**Alert threshold:** red at probability ≥ {MODEL.threshold:.6f}, amber from "
+            f"{MODEL.amber_from:.6f} (half of red), from {MODEL.thr_source}. **Rule:** {ALERT_RATE:.0%} of "
+            f"{THRESHOLD_BASIN} over-water validation rows (2016-2019) red; this model reaches "
+            f"{MODEL.val_rate:.1%} on those rows.")
     if MODEL.kind == "lgbm":
-        if IS_FROZEN and FROZEN_THR is not None and round(MODEL.threshold, 6) == FROZEN_THR:
-            line += f" Model file and threshold match docs/freeze.md ({FROZEN_THR})."
-        else:
-            line += " ⚠ Model file or threshold does NOT match docs/freeze.md."
+        line += (" Model file SHA-256 matches docs/freeze.md." if IS_FROZEN
+                 else " ⚠ Model file does NOT match docs/freeze.md.")
     return line
 
 
@@ -341,139 +347,114 @@ def forecast(*vals):
     return alert_html(p, MODEL.level(p)), "\n\n".join(lines)
 
 
-# ======================================================================= tab 2
-PERS = fit_persistence(pd.read_parquet(TRAIN_PATH))  # baseline shown next to the model (train only)
+# ======================================================================= replay tab
+# Data: data/processed/predictions.parquet (saved by the frozen test run) + tracks.parquet.
+# If predictions.parquet is missing, the same frozen-model predictions are computed live from
+# tracks.parquet (clearly labelled). test.parquet is never read.
+SAFETY = ("Low RI likelihood does NOT mean the cyclone is safe. "
+          "It only means sudden strengthening is less likely.")
+RETRO = ("Retrospective experiment: predictions made with the frozen model using only data "
+         "available at each time.")
+DEMO_FIRST = [("AMPHAN", 2020), ("DANA", 2024), ("YAAS", 2021), ("GULAB", 2021), ("JAWAD", 2021)]
+SUCCESS_CASE = ("AMPHAN", 2020)
+FALSE_ALARM_CASE = ("DANA", 2024)
+BOB_VIEW = dict(lat=(6.0, 23.5), lon=(79.0, 97.0))  # Bay of Bengal (must stay in view)
+MAP_ASPECT = 1.93  # map box width / height at 70vh on a 16:9 laptop window (measured in the browser)
+
+
+def split_of(season: int) -> str:
+    return "train (1980-2015)" if season <= 2015 else "validation (2016-2019)" if season <= 2019 else "test (2020+)"
 
 
 def load_tracks() -> pd.DataFrame:
-    """All North Indian Ocean storms (any row with BASIN NI)."""
+    """All North Indian Ocean storms (any row with BASIN NI), from tracks.parquet."""
     df = pd.read_parquet(TRACKS_PATH)
     ni = df.loc[df["BASIN"] == "NI", "SID"].unique()
     return df[df["SID"].isin(ni)].sort_values(["SID", "ISO_TIME"]).reset_index(drop=True)
 
 
-def load_predictions() -> pd.DataFrame | None:
-    """data/processed/predictions.parquet from the frozen test run, if present. Never test.parquet."""
-    if not PRED_PATH.exists():
-        print(f"[predictions] {_rel(PRED_PATH)} not found: every storm is computed live.", flush=True)
-        return None
-    p = pd.read_parquet(PRED_PATH)
-    need = {"SID", "ISO_TIME", "P_MAIN"}
-    if not need <= set(p.columns):
-        print(f"WARNING: {_rel(PRED_PATH)} lacks {sorted(need - set(p.columns))}; ignoring it.",
-              file=sys.stderr, flush=True)
-        return None
-    p["ISO_TIME"] = pd.to_datetime(p["ISO_TIME"])
-    assert not p.duplicated(["SID", "ISO_TIME"]).any(), "duplicate SID/ISO_TIME in predictions file"
-    print(f"[predictions] read {_rel(PRED_PATH)}: {len(p)} rows, {p['SID'].nunique()} storms.", flush=True)
-    return p
-
-
 TRACKS = load_tracks()
-PRED = load_predictions()
-PRED_SIDS = set(PRED["SID"]) if PRED is not None else set()
-
-_names = TRACKS.groupby("SID").agg(NAME=("NAME", "first"), SEASON=("SEASON", "first"),
-                                   SUB=("SUBBASIN", lambda s: "/".join(sorted(set(s) - {"MM"}) or ["NI"])),
-                                   START=("ISO_TIME", "min")).reset_index()
-_names["LABEL"] = (_names["NAME"].str.title() + " (" + _names["SEASON"].astype(str) + ", "
-                   + _names["SUB"] + ")")
-_default = (_names["NAME"] == DEFAULT_STORM[0]) & (_names["SEASON"] == DEFAULT_STORM[1])
-_names = pd.concat([_names[_default], _names[~_default].sort_values("START", ascending=False)])
-STORM_CHOICES = [(f"{lab}  [{sid}]", sid) for lab, sid in zip(_names["LABEL"], _names["SID"])]
-SEASON_OF = dict(zip(_names["SID"], _names["SEASON"]))
-CASEBOOK = [(lab, sid) for lab, sid in CASEBOOK if sid in SEASON_OF]
 
 
-def source_label(sid: str) -> tuple[str, str]:
-    """(short label, explanation) for how this storm's model predictions were made."""
-    season = SEASON_OF[sid]
-    if sid in PRED_SIDS:
-        src = PRED.loc[PRED["SID"] == sid, "SOURCE"].iloc[0] if "SOURCE" in PRED else ""
-        if re.search(r"loso|retrain|leave", str(src), re.I):
-            return ("retrained without this storm (illustration)",
-                    f"From {_rel(PRED_PATH)}: a model retrained without this storm. Illustration, not a headline metric.")
-        return ("frozen test model",
-                f"From {_rel(PRED_PATH)}, written by the single frozen test run (docs/results_test.md).")
-    if MODEL.kind != "lgbm":
-        return ("persistence fallback", "The trained model did not load; these are persistence probabilities.")
-    if season >= 2020:
-        if IS_FROZEN:
-            return ("frozen test model",
-                    "Computed live from models/ri_lgbm.txt, whose SHA-256 matches docs/freeze.md.")
-        return ("model file not frozen", "Computed live from a model file that does NOT match docs/freeze.md.")
-    if season >= 2016:
-        return ("validation storm: illustration only",
-                "2016-2019 validation storm: used to tune the model and set the threshold. Not a fair test, "
-                "and not retrained without this storm.")
-    return ("training storm: illustration only",
-            "1980-2015 training storm: the model learned from it (in-sample). Not a fair test, and not "
-            "retrained without this storm.")
+def live_predictions() -> pd.DataFrame:
+    """Fallback when predictions.parquet is missing: the frozen model on the same rows the test run
+    scored (NI storms, SEASON >= 2020, over water, with t-24h and t+24h), from tracks.parquet."""
+    from src.eval.baselines import TRAIN_PATH as _TP  # persistence is fitted on train (fallback only)
+    pers = fit_persistence(pd.read_parquet(_TP))
+    out = []
+    for sid, g in TRACKS[TRACKS["SEASON"] >= 2020].groupby("SID"):
+        s = storm_features(g)
+        s = _merge_offset(s, 24, ["USA_WIND"])
+        s = s[s["HAS_HISTORY"] & s["TIME_P24"].notna() & (s["DIST2LAND"] > 0)
+              & (s["BASIN"].astype(str) == "NI")].copy()
+        if s.empty:
+            continue
+        s["P_MAIN"] = MODEL.predict(s)
+        s["P_PERSISTENCE"] = pers.predict_proba(s[["DWIND_24"]].to_numpy())[:, 1]
+        s["ALERT"] = [MODEL.level(p) for p in s["P_MAIN"]]
+        s["RI"] = ((s["USA_WIND_P24"] - s["USA_WIND"]) >= RI_THRESHOLD_KT).astype(int)
+        out.append(s[["SID", "ISO_TIME", "P_MAIN", "P_PERSISTENCE", "ALERT", "RI"]])
+    return pd.concat(out, ignore_index=True)
 
 
-def add_actual_ri(df: pd.DataFrame) -> pd.DataFrame:
-    """Actual RI (for checking only, never a model input): wind at t+24h matched by timestamp.
-    Rows with no t+24h row have unknown RI and are not scored."""
-    df = _merge_offset(df, 24, ["USA_WIND"])
-    df["RI"] = ((df["USA_WIND_P24"] - df["USA_WIND"]) >= RI_THRESHOLD_KT).astype(int)
-    return df
+def load_predictions() -> tuple[pd.DataFrame, str]:
+    if PRED_PATH.exists():
+        p = pd.read_parquet(PRED_PATH)
+        need = {"SID", "ISO_TIME", "P_MAIN", "P_PERSISTENCE", "ALERT", "RI"}
+        missing = need - set(p.columns)
+        if missing:
+            raise ValueError(f"{_rel(PRED_PATH)} lacks columns {sorted(missing)}")
+        p["ISO_TIME"] = pd.to_datetime(p["ISO_TIME"])
+        assert not p.duplicated(["SID", "ISO_TIME"]).any(), "duplicate SID/ISO_TIME in predictions file"
+        print(f"[replay] read {_rel(PRED_PATH)}: {len(p)} rows, {p['SID'].nunique()} storms.", flush=True)
+        return p, f"saved predictions from {_rel(PRED_PATH)} (frozen test run)"
+    print(f"WARNING: {_rel(PRED_PATH)} not found: replay predictions are computed live from "
+          "tracks.parquet with the frozen model (same rows as the test run).", file=sys.stderr, flush=True)
+    p = live_predictions()
+    print(f"[replay] computed live: {len(p)} rows, {p['SID'].nunique()} storms.", flush=True)
+    return p, "computed live with the frozen model (predictions.parquet not found)"
+
+
+PRED, PRED_SOURCE = load_predictions()
+_meta = (TRACKS.groupby("SID").agg(NAME=("NAME", "first"), SEASON=("SEASON", "first"),
+                                   START=("ISO_TIME", "min")).loc[lambda d: d.index.isin(PRED["SID"])]
+         .reset_index())
+_meta["SHORT"] = _meta["NAME"].str.split(":").str[0]  # e.g. "GULAB:SHAHEEN-GU" -> "GULAB"
+_meta["LABEL"] = _meta["NAME"].str.title() + " " + _meta["SEASON"].astype(str)
+_key = list(zip(_meta["SHORT"], _meta["SEASON"]))
+_meta["ORDER"] = [DEMO_FIRST.index(k) if k in DEMO_FIRST else len(DEMO_FIRST) for k in _key]
+_meta = _meta.sort_values(["ORDER", "START"], ascending=[True, False])
+STORM_CHOICES = [(f"{lab}  [{sid}]", sid) for lab, sid in zip(_meta["LABEL"], _meta["SID"])]
+SEASON_OF = dict(zip(_meta["SID"], _meta["SEASON"]))
+
+
+def sid_of(name: str, season: int) -> str | None:
+    m = _meta[(_meta["SHORT"] == name) & (_meta["SEASON"] == season)]
+    return m["SID"].iloc[0] if len(m) else None
 
 
 @lru_cache(maxsize=64)
-def storm_rows(sid: str) -> pd.DataFrame:
-    """Features, live model + persistence probabilities, actual RI; predictions.parquet values
-    replace the live model ones for storms it contains."""
-    s = storm_features(TRACKS[TRACKS["SID"] == sid])
-    s = add_actual_ri(s).sort_values("ISO_TIME").reset_index(drop=True)
-    h = s["HAS_HISTORY"].to_numpy()
-    p_live, p_pers = np.full(len(s), np.nan), np.full(len(s), np.nan)
-    if h.any():
-        p_live[h] = MODEL.predict(s[h])
-        p_pers[h] = PERS.predict_proba(s.loc[h, ["DWIND_24"]].to_numpy())[:, 1]
-    s["P_LIVE"], s["P_PERS"] = p_live, p_pers
-    s["ri_prob"] = p_live
-    if sid in PRED_SIDS:
-        f = PRED[PRED["SID"] == sid].set_index("ISO_TIME")
-        s["ri_prob"] = s["ISO_TIME"].map(f["P_MAIN"]).astype(float).to_numpy()
-        if "P_PERSISTENCE" in f:
-            s["P_PERS"] = s["ISO_TIME"].map(f["P_PERSISTENCE"]).astype(float).to_numpy()
-        both = s["ri_prob"].notna() & s["P_LIVE"].notna()
-        if both.any() and MODEL.kind == "lgbm":
-            diff = float((s.loc[both, "ri_prob"] - s.loc[both, "P_LIVE"]).abs().max())
-            if diff > 1e-6:
-                print(f"WARNING: {sid}: predictions file differs from the live model by up to {diff:.4f}",
-                      file=sys.stderr, flush=True)
-    # Scored rows = what the evaluation scores: over water, forecast available, t+24h known.
-    s["SCORED"] = (s["DIST2LAND"] > 0) & s["ri_prob"].notna() & s["USA_WIND_P24"].notna()
-    return s
-
-
-def level_at(p: float, thr: float) -> str:
-    if pd.isna(p):
-        return "none"
-    return "red" if p >= thr else "amber" if p >= AMBER_SHARE * thr else "green"
-
-
-def scored(sid: str, thr: float):
-    """Alert levels, RI episodes and counts for one storm at red threshold thr (scored rows only)."""
-    s = storm_rows(sid).copy()
-    s["ALERT"] = [level_at(p, thr) for p in s["ri_prob"]]
-    w = s[s["SCORED"]]
-    if len(w):
-        eps, storms = episode_alerts(w, "ri_prob", thr)
-        red = w["ri_prob"] >= thr
-        eps["RED_DURING"] = [bool(red[(w["ISO_TIME"] >= a) & (w["ISO_TIME"] <= b)].any())
+def storm_view(sid: str):
+    """Track rows of one storm with saved predictions attached, plus RI episodes (scored rows only)."""
+    s = TRACKS[TRACKS["SID"] == sid].copy()
+    s = _merge_offset(s, 24, ["USA_WIND"])  # actual wind 24 h later, shown only after Reveal
+    p = PRED[PRED["SID"] == sid].drop(columns=[c for c in ("SID",) if c in PRED])
+    keep = ["ISO_TIME", "P_MAIN", "P_PERSISTENCE", "ALERT", "RI"]
+    s = s.merge(p[keep], on="ISO_TIME", how="left").sort_values("ISO_TIME").reset_index(drop=True)
+    s["ALERT"] = s["ALERT"].fillna("none")
+    s["HAS24"] = (s["ISO_TIME"] - pd.Timedelta(hours=24)).isin(set(s["ISO_TIME"]))
+    sc = s[s["P_MAIN"].notna()].copy()
+    if len(sc):
+        # Caught / lead time from the saved alert colours (red = 1), so the replay matches the test run.
+        sc["RED"] = (sc["ALERT"] == "red").astype(float)
+        eps, storms = episode_alerts(sc, "RED", 0.5)
+        eps["RED_DURING"] = [bool(sc.loc[(sc["ISO_TIME"] >= a) & (sc["ISO_TIME"] <= b), "RED"].any())
                              for a, b in zip(eps["START"], eps["END"])]
         fa = int(storms["N_FALSE_ALARMS"].sum())
     else:
-        eps = pd.DataFrame(columns=["START", "END", "CAUGHT", "LEAD_H", "RED_DURING"])
-        fa = 0
-    s["EP_START"] = s["ISO_TIME"].isin(eps["START"]) & s["SCORED"]
-    counts = {"rows": len(w), "red rows": int((w["ri_prob"] >= thr).sum()) if len(w) else 0,
-              "episodes": len(eps), "caught": int(eps["CAUGHT"].sum()) if len(eps) else 0,
-              "false alarms": fa}
-    counts["missed"] = counts["episodes"] - counts["caught"]
-    return s, eps, counts
+        eps, fa = pd.DataFrame(columns=["START", "END", "CAUGHT", "LEAD_H", "RED_DURING"]), 0
+    s["EP_START"] = s["ISO_TIME"].isin(eps["START"])
+    return s, eps, fa
 
 
 def _l(x) -> list:
@@ -486,90 +467,148 @@ def _t(x) -> list:
     return [t.strftime("%Y-%m-%d %H:%M") for t in x]
 
 
-def make_map(s: pd.DataFrame, i: int) -> go.Figure:
-    shown = s.iloc[: i + 1]
+def _merc(lat: float) -> float:
+    return float(np.degrees(np.log(np.tan(np.pi / 4 + np.radians(lat) / 2))))
+
+
+def map_window(s: pd.DataFrame) -> tuple[tuple, tuple]:
+    """(lat range, lon range) whose Mercator shape matches the map box (MAP_ASPECT wide : 1 high),
+    so the map fills the frame with no empty bands. Bay of Bengal window when the storm fits in it,
+    else a window around the storm."""
+    lat, lon = BOB_VIEW["lat"], BOB_VIEW["lon"]
+    if not (s["LAT"].between(*lat).all() and s["LON"].between(*lon).all()):
+        lat = (float(s["LAT"].min()) - 3, float(s["LAT"].max()) + 3)
+        lon = (float(s["LON"].min()) - 3, float(s["LON"].max()) + 3)
+    need = max(_merc(lat[1]) - _merc(lat[0]), (lon[1] - lon[0]) / MAP_ASPECT)  # Mercator height to show
+    mid_y = (_merc(lat[0]) + _merc(lat[1])) / 2
+    inv = lambda y: float(np.degrees(2 * np.arctan(np.exp(np.radians(y))) - np.pi / 2))  # noqa: E731
+    lat_r = (inv(mid_y - need / 2), inv(mid_y + need / 2))
+    mid_x, half_w = sum(lon) / 2, need * MAP_ASPECT / 2
+    return lat_r, (mid_x - half_w, mid_x + half_w)
+
+
+def make_map(s: pd.DataFrame, i: int, reveal: bool, extra=None) -> go.Figure:
+    shown = s if reveal else s.iloc[: i + 1]
     fig = go.Figure()
-    fig.add_trace(go.Scattergeo(lat=_l(s["LAT"]), lon=_l(s["LON"]), mode="lines", hoverinfo="skip",
-                                line=dict(width=1, color="lightgrey", dash="dot"), name="full track"))
     fig.add_trace(go.Scattergeo(lat=_l(shown["LAT"]), lon=_l(shown["LON"]), mode="lines",
-                                hoverinfo="skip", line=dict(width=2, color="grey"), showlegend=False))
-    names = {"green": "green", "amber": "amber", "red": "red", "none": "no forecast"}
+                                hoverinfo="skip", line=dict(width=2.5, color="#555"), showlegend=False))
+    names = {"green": "green", "amber": "amber", "red": "red", "none": "no saved prediction"}
     for lvl, col in COLOURS.items():
         d = shown[shown["ALERT"] == lvl]
         if d.empty:
             continue
         fig.add_trace(go.Scattergeo(
             lat=_l(d["LAT"]), lon=_l(d["LON"]), mode="markers", name=names[lvl],
-            marker=dict(size=9, color=col, line=dict(width=0.5, color="black")),
-            text=[f"{t:%d %b %H:%M} UTC<br>wind {w:.0f} kt<br>RI chance "
+            marker=dict(size=11, color=col, line=dict(width=0.6, color="black")),
+            text=[f"{t:%d %b %H:%M} UTC<br>wind {w:.0f} kt<br>RI likelihood "
                   + ("–" if pd.isna(p) else f"{p:.0%}")
-                  for t, w, p in zip(d["ISO_TIME"], d["USA_WIND"], d["ri_prob"])],
+                  for t, w, p in zip(d["ISO_TIME"], d["USA_WIND"], d["P_MAIN"])],
             hoverinfo="text"))
-    st = shown[shown["EP_START"]]
-    fig.add_trace(go.Scattergeo(
-        lat=_l(st["LAT"]), lon=_l(st["LON"]), mode="markers", name="rapid strengthening began",
-        marker=dict(symbol="star", size=18, color="rgba(0,0,0,0)", line=dict(width=2, color="black")),
-        text=[f"Rapid strengthening began {t:%d %b %H:%M} UTC" for t in st["ISO_TIME"]],
-        hoverinfo="text"))
+    if reveal:
+        st = s[s["EP_START"]]
+        fig.add_trace(go.Scattergeo(
+            lat=_l(st["LAT"]), lon=_l(st["LON"]), mode="markers", name="rapid strengthening began",
+            marker=dict(symbol="star", size=22, color="rgba(0,0,0,0)", line=dict(width=2.5, color="black")),
+            text=[f"Rapid strengthening began {t:%d %b %H:%M} UTC" for t in st["ISO_TIME"]],
+            hoverinfo="text"))
+    if extra is not None:
+        extra(fig)
     now = s.iloc[i]
     fig.add_trace(go.Scattergeo(lat=[float(now["LAT"])], lon=[float(now["LON"])], mode="markers",
-                                name="now", hoverinfo="skip",
-                                marker=dict(size=16, color="rgba(0,0,0,0)",
-                                            line=dict(width=2.5, color="#1d3557"))))
-    fig.update_geos(projection_type="mercator", showland=True, landcolor="#eeeeee",
-                    showocean=True, oceancolor="#dfefff", showcountries=True,
-                    lataxis_range=[float(s["LAT"].min()) - 4, float(s["LAT"].max()) + 4],
-                    lonaxis_range=[float(s["LON"].min()) - 6, float(s["LON"].max()) + 6])
-    fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=430,
-                      legend=dict(orientation="h", y=-0.02))
+                                name="chosen time", hoverinfo="skip",
+                                marker=dict(size=20, color="rgba(0,0,0,0)",
+                                            line=dict(width=3, color="#1d3557"))))
+    lat_r, lon_r = map_window(s)
+    fig.update_geos(projection_type="mercator", showland=True, landcolor="#ececec",
+                    showocean=True, oceancolor="#dceefc", showcountries=True, countrycolor="#999",
+                    showcoastlines=True, coastlinecolor="#777", showframe=False, resolution=50,
+                    lataxis_range=list(lat_r), lonaxis_range=list(lon_r),
+                    domain=dict(x=[0, 1], y=[0, 1]))
+    fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), autosize=True,
+                      paper_bgcolor="#dceefc",
+                      legend=dict(orientation="h", y=0.01, x=0.01, bgcolor="rgba(255,255,255,0.8)"))
     return fig
 
 
-def make_chart(s: pd.DataFrame, eps: pd.DataFrame, i: int, thr: float) -> go.Figure:
-    """Wind (left axis) and model / persistence probability (right axis) over time, with the
-    observed RI windows shaded and the red threshold drawn."""
-    x = _t(s["ISO_TIME"])
+def make_chart(s: pd.DataFrame, eps: pd.DataFrame, i: int, reveal: bool) -> go.Figure:
+    """Wind (left axis), model and persistence probability (right axis), dashed threshold,
+    observed RI window shaded. Before Reveal: nothing after the chosen time."""
+    now = s["ISO_TIME"].iloc[i]
+    shown = s if reveal else s.iloc[: i + 1]
+    x = _t(shown["ISO_TIME"])
     fig = go.Figure()
-    for _, e in eps.iterrows():  # RI at t = rise over t..t+24h, so the window ends 24 h after the last RI row
-        fig.add_vrect(x0=e["START"].strftime("%Y-%m-%d %H:%M"),
-                      x1=(e["END"] + pd.Timedelta(hours=24)).strftime("%Y-%m-%d %H:%M"),
-                      fillcolor="#d62828", opacity=0.12, line_width=0, layer="below")
-    fig.add_trace(go.Scatter(x=x, y=_l(s["USA_WIND"]), name="wind (kt)", mode="lines+markers",
-                             line=dict(color="#1d3557", width=2), marker=dict(size=4)))
-    fig.add_trace(go.Scatter(x=x, y=_l(s["ri_prob"]), name="model RI probability", yaxis="y2",
-                             mode="lines+markers", line=dict(color="#d62828", width=2), marker=dict(size=4)))
-    fig.add_trace(go.Scatter(x=x, y=_l(s["P_PERS"]), name="persistence probability", yaxis="y2",
-                             mode="lines", line=dict(color="#6c757d", width=2, dash="dash")))
-    fig.add_trace(go.Scatter(x=[x[0], x[-1]], y=[thr, thr], name=f"red threshold {thr:.3f}", yaxis="y2",
-                             mode="lines", line=dict(color="#d62828", width=1, dash="dot")))
-    fig.add_trace(go.Scatter(x=[None], y=[None], name="observed RI window (shaded)", mode="markers",
-                             marker=dict(size=12, color="rgba(214,40,40,0.25)", symbol="square")))
-    fig.add_vline(x=x[i], line=dict(color="#1d3557", width=1.5, dash="dash"))
-    pmax = np.nanmax([s["ri_prob"].max(), s["P_PERS"].max(), thr, 0.1])
+    for _, e in eps.iterrows():
+        # RI at row r = wind rose >= 30 kt over r..r+24h. Before Reveal, a window is shown only once
+        # it can be known at the chosen time (r + 24 h <= now), and it is cut at the chosen time.
+        end = e["END"] + pd.Timedelta(hours=24)
+        if not reveal:
+            if e["START"] + pd.Timedelta(hours=24) > now:
+                continue
+            end = min(end, now)
+        fig.add_vrect(x0=e["START"].strftime("%Y-%m-%d %H:%M"), x1=end.strftime("%Y-%m-%d %H:%M"),
+                      fillcolor="#d62828", opacity=0.14, line_width=0, layer="below")
+    fig.add_trace(go.Scatter(x=x, y=_l(shown["USA_WIND"]), name="wind (kt)", mode="lines+markers",
+                             line=dict(color="#1d3557", width=2.5), marker=dict(size=5)))
+    fig.add_trace(go.Scatter(x=x, y=_l(shown["P_MAIN"]), name="model RI probability", yaxis="y2",
+                             mode="lines+markers", line=dict(color="#d62828", width=2.5), marker=dict(size=5)))
+    fig.add_trace(go.Scatter(x=x, y=_l(shown["P_PERSISTENCE"]), name="persistence probability",
+                             yaxis="y2", mode="lines", line=dict(color="#6c757d", width=2, dash="dot")))
+    full = _t(s["ISO_TIME"])
+    fig.add_trace(go.Scatter(x=[full[0], full[-1]], y=[MODEL.threshold] * 2, yaxis="y2", mode="lines",
+                             name=f"alert threshold {MODEL.threshold:.3f}",
+                             line=dict(color="#d62828", width=1.5, dash="dash")))
+    fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers", name="observed RI window",
+                             marker=dict(size=12, symbol="square", color="rgba(214,40,40,0.3)")))
+    fig.add_vline(x=_t([now])[0], line=dict(color="#1d3557", width=1.5, dash="dash"))
+    pmax = np.nanmax([s["P_MAIN"].max(), s["P_PERSISTENCE"].max(), MODEL.threshold, 0.1])
+    wmax = float(s["USA_WIND"].max())
     fig.update_layout(
-        height=300, margin=dict(l=10, r=10, t=10, b=10), hovermode="x unified",
-        yaxis=dict(title="wind (kt)", rangemode="tozero"),
-        yaxis2=dict(title="RI probability", overlaying="y", side="right", range=[0, min(1.0, 1.15 * pmax)],
-                    tickformat=".0%", showgrid=False),
-        legend=dict(orientation="h", y=-0.25))
+        height=340, margin=dict(l=10, r=10, t=10, b=10), hovermode="x unified",
+        xaxis=dict(range=[full[0], full[-1]]),
+        yaxis=dict(title="wind (kt)", range=[0, 1.1 * wmax]),
+        yaxis2=dict(title="RI probability", overlaying="y", side="right", tickformat=".0%",
+                    range=[0, min(1.0, 1.15 * pmax)], showgrid=False),
+        legend=dict(orientation="h", y=-0.22))
     return fig
 
 
-def pers_tile(p: float) -> str:
-    lvl = level_at(p, PERS_RED)
-    prob = "–" if pd.isna(p) else "<1%" if p < 0.005 else f"{p:.0%}"
-    return (f"<div style='border:2px solid {COLOURS[lvl]};border-radius:10px;padding:10px 14px;"
-            f"text-align:center'><div style='font-size:13px'>Persistence baseline (last-24h wind change only; "
-            f"red at {PERS_RED}, i.e. rise ≥ 25 kt)</div><div style='font-size:30px;font-weight:800'>{prob}</div>"
-            f"<div style='font-size:15px;font-weight:700;color:{COLOURS[lvl]}'>{lvl.upper()}</div></div>")
+def now_panel(s: pd.DataFrame, i: int) -> str:
+    """Probability tile, alert colour, wind now, persistence, and the safety sentence."""
+    r = s.iloc[i]
+    p, lvl = r["P_MAIN"], r["ALERT"]
+    words = {"red": "RED: much more likely than usual", "amber": "AMBER: more likely than usual",
+             "green": "GREEN: less likely than usual", "none": "No saved prediction at this time"}
+    if pd.isna(p):
+        why = ("needs a reading from 24 h earlier" if not r["HAS24"] else
+               "over land" if r["DIST2LAND"] <= 0 else
+               "the test run only scored rows whose wind 24 h later is known")
+        prob = f"<div style='font-size:14px;color:#fff !important'>({why})</div>"
+    else:
+        prob = (f"<div style='font-size:48px;font-weight:800;line-height:1.05;color:#fff !important'>"
+                f"{'<1%' if p < 0.005 else f'{p:.0%}'}</div>")
+    pp = r["P_PERSISTENCE"]
+    pers = "–" if pd.isna(pp) else ("<1%" if pp < 0.005 else f"{pp:.0%}")
+    return (f"<div style='background:{COLOURS[lvl]};border-radius:12px;padding:14px 16px;text-align:center'>"
+            f"<div style='font-size:14px;font-weight:700;color:#fff !important'>RI likelihood (next 24 h)</div>"
+            f"{prob}<div style='font-size:18px;font-weight:800;color:#fff !important'>{words[lvl]}</div></div>"
+            f"<div style='margin-top:8px;padding:8px 10px;border:2px solid #d62828;border-radius:8px;"
+            f"font-weight:700'>{SAFETY}</div>"
+            f"<div style='margin-top:10px;font-size:15px'><b>{r['ISO_TIME']:%d %b %Y %H:%M} UTC</b><br>"
+            f"Current wind: <b>{r['USA_WIND']:.0f} kt</b> · distance to land {r['DIST2LAND']:.0f} km<br>"
+            f"Persistence baseline: {pers}</div>")
 
 
-def lead_labels(eps: pd.DataFrame, now) -> str:
-    """One line per scored RI episode that has started by the chosen time."""
-    eps = eps[eps["START"] <= now]
+def outcome_md(s: pd.DataFrame, eps: pd.DataFrame, fa: int, i: int, reveal: bool) -> str:
+    if not reveal:
+        return ("_What happened next is hidden. Everything above uses only data up to the chosen time. "
+                "Press **Reveal what happened next** to see the rest of the track and the outcome._")
+    r = s.iloc[i]
+    nxt = r["USA_WIND_P24"] - r["USA_WIND"]
+    lines = ["**What happened next**",
+             "Wind 24 h after the chosen time: " + ("not in the track" if pd.isna(nxt) else
+                                                   f"{r['USA_WIND_P24']:.0f} kt ({nxt:+.0f} kt)")]
     if eps.empty:
-        return "_No rapid strengthening has begun yet at this time (over-water scored rows)._"
-    out = []
+        lines.append("No rapid strengthening (rise of 30 kt or more in 24 h) on this storm's scored rows.")
     for _, e in eps.iterrows():
         when = f"{e['START']:%d %b %H:%M} UTC"
         if e["CAUGHT"]:
@@ -577,78 +616,63 @@ def lead_labels(eps: pd.DataFrame, now) -> str:
             if e["LEAD_H"] == 0:
                 msg += " (red at the 6-hourly point where it began)"
         elif e["RED_DURING"]:
-            msg = "Alert turned red only after strengthening began"
+            msg = "Alert turned red only after it began"
         else:
-            msg = "Alert did not turn red during this strengthening"
-        out.append(f"⭐ **{when}:** {msg}.")
-    return "\n\n".join(out)
+            msg = "Missed"
+        lines.append(f"⭐ Strengthening began {when}: **{msg}**.")
+    lines.append(f"False-alarm episodes on this storm (red runs with no rapid strengthening): **{fa}**.")
+    return "\n\n".join(lines)
 
 
-def counts_md(c: dict, thr: float) -> str:
-    frozen = abs(thr - MODEL.threshold) < 1e-9
-    tag = "the frozen threshold" if frozen else f"an exploratory threshold (frozen is {MODEL.threshold:.3f})"
-    return (f"**At red threshold {thr:.3f}** ({tag}), on this storm's {c['rows']} scored rows "
-            f"(over water, forecast available, wind 24 h later known): "
-            f"**{c['caught']} caught**, **{c['missed']} missed** of {c['episodes']} RI episodes; "
-            f"**{c['false alarms']} false-alarm episodes**; {c['red rows']} of {c['rows']} rows red. "
-            "Caught = red at the episode's first row.")
+def label_html(sid: str) -> str:
+    season = SEASON_OF[sid]
+    return (f"<div style='border-left:5px solid #1d3557;padding:6px 12px;background:rgba(29,53,87,0.06)'>"
+            f"<b>Split: {split_of(season)}</b> · predictions: {PRED_SOURCE}<br>"
+            f"<span style='font-size:13px'>{RETRO}</span></div>")
 
 
-def side_panel(s: pd.DataFrame, eps: pd.DataFrame, i: int, thr: float) -> tuple[str, str, str]:
-    r = s.iloc[i]
-    p = r["ri_prob"]
-    lines = [f"### {r['ISO_TIME']:%d %b %Y %H:%M} UTC",
-             f"**Wind:** {r['USA_WIND']:.0f} kt · **Distance to land:** {r['DIST2LAND']:.0f} km"]
-    if pd.isna(p):
-        why = ("needs a reading from 24 h earlier" if not r["HAS_HISTORY"]
-               else "this row is not in the predictions file (e.g. over land or no reading 24 h later)")
-        lines.append(f"_No model forecast: {why}._")
-    else:
-        lines += ["**Top 3 reasons** (from the model file)",
-                  "\n".join(f"{k}. {t}" for k, t in enumerate(MODEL.reasons(s.iloc[[i]]), 1))]
-    actual = r["USA_WIND_P24"] - r["USA_WIND"]
-    lines.append("**What actually happened next 24 h:** "
-                 + ("not known (no reading 24 h later)" if pd.isna(actual)
-                    else f"wind changed {actual:+.0f} kt"
-                    + (" (rapid strengthening)" if actual >= RI_THRESHOLD_KT else "")))
-    lines += ["---", "**Alert vs actual strengthening**", lead_labels(eps, r["ISO_TIME"])]
-    return alert_html(p, level_at(p, thr)), pers_tile(r["P_PERS"]), "\n\n".join(lines)
-
-
-def source_md(sid: str) -> str:
-    short, long = source_label(sid)
-    colour = "#1d3557" if short == "frozen test model" else "#8a5a00"
-    return (f"<div style='border-left:5px solid {colour};padding:6px 12px;background:rgba(0,0,0,0.03)'>"
-            f"<b>Predictions for this storm: {short}</b><br><span style='font-size:12px'>{long}</span></div>")
+def render(sid: str, i: float, reveal: bool):
+    s, eps, fa = storm_view(sid)
+    i = int(min(max(i, 0), len(s) - 1))
+    return (make_map(s, i, reveal), make_chart(s, eps, i, reveal), now_panel(s, i),
+            outcome_md(s, eps, fa, i, reveal), label_html(sid))
 
 
 def time_label(s: pd.DataFrame) -> str:
-    return (f"Time step (6-hourly, {s['ISO_TIME'].iloc[0]:%d %b} to {s['ISO_TIME'].iloc[-1]:%d %b %Y}; "
-            "chosen time shown on the right)")
+    return (f"Time (6-hourly, {s['ISO_TIME'].iloc[0]:%d %b %H:%M} to "
+            f"{s['ISO_TIME'].iloc[-1]:%d %b %Y %H:%M} UTC)")
 
 
-def view(sid: str, i: float, thr: float):
-    s, eps, c = scored(sid, float(thr))
-    i = int(min(max(i, 0), len(s) - 1))
-    a, pt, panel = side_panel(s, eps, i, float(thr))
-    return (make_map(s, i), make_chart(s, eps, i, float(thr)), a, pt, panel,
-            counts_md(c, float(thr)), source_md(sid))
+def default_index(sid: str) -> int:
+    """Start at the first time with a saved prediction, so the demo opens on a forecast."""
+    s, _, _ = storm_view(sid)
+    has = np.flatnonzero(s["P_MAIN"].notna().to_numpy())
+    return int(has[0]) if len(has) else 0
 
 
-def on_storm(sid: str, thr: float):
-    s = storm_rows(sid)
-    i = len(s) - 1
-    # max(i, 1): Gradio needs maximum > minimum; a one-row storm is clamped in view().
-    return (gr.Slider(minimum=0, maximum=max(i, 1), value=i, step=1, label=time_label(s)),
-            *view(sid, i, thr))
+def on_storm(sid: str):
+    s, _, _ = storm_view(sid)
+    i = default_index(sid)
+    return (gr.Slider(minimum=0, maximum=max(len(s) - 1, 1), value=i, step=1, label=time_label(s)),
+            False, *render(sid, i, False))
 
 
-def casebook_md() -> str:
-    rows = [f"**{lab}**: {source_label(sid)[0]}" for lab, sid in CASEBOOK]
-    return "Casebook (click a name above): " + " · ".join(rows) + f". {CASEBOOK_NOTE}"
+def on_time(sid: str, i: float):
+    return (False, *render(sid, i, False))
+
+
+def on_reveal(sid: str, i: float):
+    return (True, *render(sid, i, True))
 
 
 # ========================================================================== UI
+CSS = """
+#replay-map { height: 70vh !important; min-height: 420px; }
+#replay-map > div, #replay-map .js-plotly-plot, #replay-map .plot-container,
+#replay-map .svg-container { height: 70vh !important; min-height: 420px; width: 100% !important; }
+"""
+
+
 def model_header() -> None:
     """Banner + threshold rule; called at the top of every tab."""
     gr.HTML(banner_html())
@@ -657,12 +681,44 @@ def model_header() -> None:
 
 def build() -> gr.Blocks:
     first = STORM_CHOICES[0][1]
-    s0 = storm_rows(first)
-    i0 = len(s0) - 1
-    v0 = view(first, i0, MODEL.threshold)
+    s0, _, _ = storm_view(first)
+    i0 = default_index(first)
+    v0 = render(first, i0, False)
+    success_sid, fa_sid = sid_of(*SUCCESS_CASE), sid_of(*FALSE_ALARM_CASE)
     with gr.Blocks(title="CycloneWatch") as demo:
         gr.Markdown(f"# {TITLE}")
         with gr.Tabs():
+            with gr.Tab("Check it on a past storm"):
+                model_header()
+                gr.Markdown("This replays a real storm to check the model's predictions against "
+                            "what actually happened.")
+                with gr.Row(equal_height=True):
+                    b_success = gr.Button("Success case: Amphan 2020", variant="primary", scale=1)
+                    b_fa = gr.Button("False alarm: Dana 2024", variant="secondary", scale=1)
+                    storm = gr.Dropdown(choices=STORM_CHOICES, value=first, scale=2,
+                                        label="Storm (casebook first: Amphan, Dana, Yaas, Gulab, Jawad)")
+                t = gr.Slider(minimum=0, maximum=max(len(s0) - 1, 1), value=i0, step=1, label=time_label(s0))
+                label = gr.HTML(v0[4])
+                fmap = gr.Plot(value=v0[0], elem_id="replay-map", show_label=False)
+                with gr.Row():
+                    with gr.Column(scale=1, min_width=260):
+                        panel = gr.HTML(v0[2])
+                    with gr.Column(scale=2, min_width=420):
+                        chart = gr.Plot(value=v0[1], label="Timeline: wind and RI probability")
+                    with gr.Column(scale=1, min_width=260):
+                        reveal_btn = gr.Button("Reveal what happened next", variant="primary")
+                        outcome = gr.Markdown(v0[3])
+                gr.Markdown(f"**{DISCLAIMER}**")
+                revealed = gr.State(False)
+                outs = [fmap, chart, panel, outcome, label]
+                storm.change(on_storm, storm, [t, revealed, *outs])
+                t.change(on_time, [storm, t], [revealed, *outs])
+                reveal_btn.click(on_reveal, [storm, t], [revealed, *outs])
+                if success_sid:
+                    b_success.click(lambda: success_sid, None, storm)
+                if fa_sid:
+                    b_fa.click(lambda: fa_sid, None, storm)
+
             with gr.Tab("Forecast a storm now"):
                 model_header()
                 gr.Markdown("Enter the latest values from the IMD bulletin.")
@@ -684,44 +740,8 @@ def build() -> gr.Blocks:
                 go_btn.click(forecast, inputs, [out_alert, out_reasons])
                 example.click(lambda: [EXAMPLE[k] for k, _ in FIELDS], None, inputs).then(
                     forecast, inputs, [out_alert, out_reasons])
-
-            with gr.Tab("Check it on a past storm"):
-                model_header()
-                gr.Markdown("This replays a real storm to check the model's predictions against "
-                            "what actually happened.")
-                with gr.Row():
-                    cb_buttons = [(gr.Button(lab, size="sm"), sid) for lab, sid in CASEBOOK]
-                gr.Markdown(casebook_md())
-                with gr.Row():
-                    storm = gr.Dropdown(choices=STORM_CHOICES, value=first, label="Storm (North Indian Ocean)")
-                    t = gr.Slider(minimum=0, maximum=max(i0, 1), value=i0, step=1, label=time_label(s0))
-                source = gr.HTML(v0[6])
-                with gr.Row():
-                    thr = gr.Slider(minimum=0.01, maximum=0.6, value=MODEL.threshold, step=0.0001,
-                                    label=(f"Red alert threshold (frozen value {MODEL.threshold:.4f}; "
-                                           "move it to explore, amber = half)"))
-                    reset = gr.Button("Reset to frozen threshold", size="sm")
-                counts = gr.Markdown(v0[5])
-                with gr.Row():
-                    with gr.Column(scale=3):
-                        fmap = gr.Plot(value=v0[0], label="Track")
-                        chart = gr.Plot(value=v0[1], label="Wind and RI probability over time")
-                    with gr.Column(scale=2):
-                        with gr.Row():
-                            r_alert = gr.HTML(v0[2])
-                        with gr.Row():
-                            r_pers = gr.HTML(v0[3])
-                        panel = gr.Markdown(v0[4])
-                gr.Markdown(f"**{DISCLAIMER}**")
-                outs = [fmap, chart, r_alert, r_pers, panel, counts, source]
-                storm.change(on_storm, [storm, thr], [t, *outs])
-                t.change(view, [storm, t, thr], outs)
-                thr.change(view, [storm, t, thr], outs)
-                reset.click(lambda: MODEL.threshold, None, thr)  # exact frozen value; thr.change redraws
-                for b, sid in cb_buttons:
-                    b.click(lambda sid=sid: sid, None, storm)
     return demo
 
 
 if __name__ == "__main__":
-    build().launch()
+    build().launch(css=CSS)
