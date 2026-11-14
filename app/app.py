@@ -112,26 +112,53 @@ def _describe(key: str, r: pd.Series) -> str:
     }.get(key, key)
 
 
+def _rel(p: Path) -> str:
+    try:
+        return p.resolve().relative_to(ROOT).as_posix()
+    except ValueError:
+        return str(p)
+
+
+def _load_lgbm():
+    """Load and check the LightGBM model + feature JSON. Raises with a clear message on any problem."""
+    import json
+    import lightgbm as lgb
+    missing = [_rel(p) for p in (MODEL_PATH, FEATURES_JSON) if not p.exists()]
+    if missing:
+        raise FileNotFoundError("missing file: " + ", ".join(missing))
+    booster = lgb.Booster(model_file=str(MODEL_PATH))
+    spec = json.loads(FEATURES_JSON.read_text(encoding="utf-8"))
+    if Path(spec["main_file"]).name != MODEL_PATH.name:
+        raise ValueError(f"{FEATURES_JSON.name} describes {spec['main_file']}, not {MODEL_PATH.name}")
+    if list(spec["features"]) != booster.feature_name():
+        raise ValueError(f"feature order in {FEATURES_JSON.name} differs from {MODEL_PATH.name}")
+    return booster, spec
+
+
 class Model:
-    """LightGBM from MODEL_PATH if present, else persistence fitted on train."""
+    """LightGBM from MODEL_PATH + FEATURES_JSON; if either is missing or fails to load,
+    persistence fitted on train, with a console warning and a red banner (never silent)."""
 
     def __init__(self):
-        if MODEL_PATH.exists():
-            import lightgbm as lgb
-            import json
-            self.booster = lgb.Booster(model_file=str(MODEL_PATH))
-            if not FEATURES_JSON.exists():
-                raise FileNotFoundError(f"{FEATURES_JSON} is needed next to {MODEL_PATH.name} "
-                                        "(feature order and BASIN categories); the app will not guess them.")
-            spec = json.loads(FEATURES_JSON.read_text(encoding="utf-8"))
-            assert Path(spec["main_file"]).name == MODEL_PATH.name, \
-                f"{FEATURES_JSON.name} describes {spec['main_file']}, not {MODEL_PATH.name}"
+        self.fallback_reason = None
+        try:
+            self.booster, spec = _load_lgbm()
+        except Exception as e:  # noqa: BLE001 - any load failure must fall back loudly
+            self.booster = None
+            self.fallback_reason = f"{type(e).__name__}: {e}"
+            print("\n" + "!" * 78, file=sys.stderr)
+            print(f"WARNING: LightGBM model NOT loaded ({self.fallback_reason}).", file=sys.stderr)
+            print(f"WARNING: expected {_rel(MODEL_PATH)} and {_rel(FEATURES_JSON)}. "
+                  "Using the PERSISTENCE BASELINE instead.", file=sys.stderr)
+            print("!" * 78 + "\n", file=sys.stderr, flush=True)
+        if self.booster is not None:
+            self.kind = "lgbm"
             self.cols = list(spec["features"])
             self.cat_cols = list(spec.get("categorical_features", []))
             self.categories = {"BASIN": list(spec["basin_categories"])}
-            assert self.cols == self.booster.feature_name(), \
-                f"feature order in {FEATURES_JSON.name} differs from the model file"
-            self.name = f"LightGBM ({MODEL_PATH.name}, {spec.get('main_model', 'main model')})"
+            self.short = f"LightGBM {spec.get('main_model', 'main model')}"
+            self.file_time = pd.Timestamp.fromtimestamp(MODEL_PATH.stat().st_mtime)
+            self.name = f"{self.short} ({MODEL_PATH.name})"
             self.cal = None
             if CAL_PATH.exists():
                 import json
@@ -140,11 +167,11 @@ class Model:
                     self.cal = cal
                     self.name += ", Platt-calibrated on 2016-2019 validation storms"
         else:
-            self.booster = None
+            self.kind = "persistence"
             self.cols, self.cat_cols, self.categories = ["DWIND_24"], [], {}
             self.pers = fit_persistence(pd.read_parquet(TRAIN_PATH))
-            self.name = ("Persistence baseline (last-24h wind change only, fitted on 1980-2015). "
-                         f"Trained model {MODEL_PATH.as_posix().replace(ROOT.as_posix() + '/', '')} not found.")
+            self.short = "persistence baseline (model file missing)"
+            self.name = "Persistence baseline (last-24h wind change only, fitted on 1980-2015)"
         val = pd.read_parquet(VAL_PATH)  # validation only, for the threshold
         val = val[val["BASIN"] == THRESHOLD_BASIN].copy()
         val["P"] = self.predict(val)
@@ -205,10 +232,26 @@ class Model:
 MODEL = Model()
 
 
+def banner_html() -> str:
+    """'Model in use' banner shown at the top of every tab: blue for LightGBM, red for the fallback."""
+    if MODEL.kind == "lgbm":
+        bg, sub = "#1d3557", (f"{MODEL.name} · model file modified "
+                              f"{MODEL.file_time:%d %b %Y %H:%M} (local time)")
+    else:
+        bg, sub = "#d62828", (f"{MODEL.name}. Reason: {MODEL.fallback_reason}. "
+                              "Forecasts below are NOT from the trained model.")
+    # !important: Gradio's own text colours otherwise override inline white text.
+    return (f"<div style='background:{bg} !important;border-radius:10px;padding:12px 18px;margin-bottom:6px'>"
+            f"<div style='color:#ffffff !important;font-size:22px;font-weight:800;line-height:1.3'>"
+            f"Model in use: {MODEL.short}</div>"
+            f"<div style='color:#ffffff !important;font-size:12px;opacity:0.92'>{sub}</div></div>")
+
+
 def model_line() -> str:
-    return (f"**Model in use:** {MODEL.name}  \nRed alert at probability ≥ {MODEL.threshold:.3f}, "
-            f"amber from {MODEL.amber_from:.3f} (threshold set on 2016-2019 North Indian Ocean validation "
-            f"storms so that {MODEL.val_rate:.0%} of their over-water forecasts are red).")
+    """Threshold and the alert-rate rule, shown under the banner."""
+    return (f"**Alert threshold:** red at probability ≥ {MODEL.threshold:.3f}, amber from "
+            f"{MODEL.amber_from:.3f}. **Rule:** {ALERT_RATE:.0%} of {THRESHOLD_BASIN} over-water "
+            f"validation rows (2016-2019) red; this model reaches {MODEL.val_rate:.1%} on those rows.")
 
 
 def alert_html(p: float, lvl: str) -> str:
@@ -402,6 +445,12 @@ def on_time(sid: str, i: float):
 
 
 # ========================================================================== UI
+def model_header() -> None:
+    """Banner + threshold rule; called at the top of every tab."""
+    gr.HTML(banner_html())
+    gr.Markdown(model_line())
+
+
 def build() -> gr.Blocks:
     first = STORM_CHOICES[0][1]
     s0 = storm_rows(first)
@@ -409,9 +458,9 @@ def build() -> gr.Blocks:
     a0, p0 = side_panel(s0, i0)
     with gr.Blocks(title="CycloneWatch") as demo:
         gr.Markdown(f"# {TITLE}")
-        gr.Markdown(model_line())
         with gr.Tabs():
             with gr.Tab("Forecast a storm now"):
+                model_header()
                 gr.Markdown("Enter the latest values from the IMD bulletin.")
                 boxes = {}
                 with gr.Row():
@@ -433,6 +482,7 @@ def build() -> gr.Blocks:
                     forecast, inputs, [out_alert, out_reasons])
 
             with gr.Tab("Check it on a past storm"):
+                model_header()
                 gr.Markdown("This replays a real storm to check the model's predictions against "
                             "what actually happened.")
                 with gr.Row():
