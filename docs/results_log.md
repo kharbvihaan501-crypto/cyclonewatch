@@ -1,8 +1,8 @@
-\# Results Log
+# Results Log
 
 
 
-\## Sat 14 Nov 2026s
+## Sat 14 Nov 2026
 
 
 ## Sat 14 Nov 2026 15:38: baselines on VALIDATION (2016-2019)
@@ -31,3 +31,38 @@ All basins, <= 400 km of land     199  1741      120           57               
                    All basins     323  5333      539          170              135                   190 0.115 [0.096, 0.134] 0.107 [0.093, 0.122] 0.809 [0.728, 0.876] 0.0918 [0.0815, 0.1024]           0.800 [0.722, 0.868] 79.4 [72.0, 85.9] 12.0 [6.0, 18.0]            0.59 [0.51, 0.67]            1000 / 0
 ```
 
+
+## Sat 14 Nov 2026: persistence hard-case recall on VALIDATION (2016-2019)
+
+Hard case = RI rows where the last-24h wind rose < 30 kt (DWIND_24 < 30). Persistence baseline, over-water rows only, alert threshold 0.0816 (max F1 on validation, same as the run above). 95% CI: 1,000 storm bootstrap resamples per subset, seed 0; resamples with no RI rows skipped. Test split not loaded.
+
+Command:
+```
+py -3.12 -c "
+import pandas as pd
+from src.eval.baselines import TRAIN_PATH, VAL_PATH, fit_persistence, predict_persistence, choose_threshold
+from src.eval.metrics import evaluate
+tr = pd.read_parquet(TRAIN_PATH); va = pd.read_parquet(VAL_PATH)
+va['P'] = predict_persistence(fit_persistence(tr), va)
+w = va[va.DIST2LAND > 0]
+thr = choose_threshold(w.RI.to_numpy(), w.P.to_numpy())
+r = evaluate(va, 'P', thr)
+m = 'recall (last-24h rise < 30 kt)'
+t = pd.DataFrame({'subset': r.subset, 'storms': r.storms, 'RI rows': r['RI rows'],
+  'RI rows rise < 30 kt': r['RI rows rise < 30 kt'],
+  'recall rise < 30 kt [95% CI]': [f'{e:.3f} [{lo:.3f}, {hi:.3f}]' for e, lo, hi in zip(r[m], r[m+' lo'], r[m+' hi'])],
+  'boot used / skipped': [f'{u} / {s}' for u, s in zip(r['boot used'], r['boot skipped (no RI)'])]})
+print(f'threshold {thr:.4f}'); print(t.to_string(index=False))
+"
+```
+
+```
+threshold 0.0816
+                       subset  storms  RI rows  RI rows rise < 30 kt recall rise < 30 kt [95% CI] boot used / skipped
+                Bay of Bengal      14       13                    12         0.667 [0.400, 1.000]             998 / 2
+           North Indian Ocean      23       28                    24         0.792 [0.565, 1.000]            1000 / 0
+All basins, <= 400 km of land     199      120                    96         0.594 [0.472, 0.720]            1000 / 0
+                   All basins     323      539                   411         0.664 [0.607, 0.729]            1000 / 0
+```
+
+Climatology is a floor: one constant per basin; report its PR-AUC only, not episodes caught.
