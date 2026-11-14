@@ -65,3 +65,67 @@ Source: the rule 8 table printed by `python -m src.data.clean`, filtered to BASI
 | 2026305N12087 | MURASU | 2026 | 2026-11-01 00:00 | 2026-11-03 06:00 | 19 |
 
 Total dropped rows for these 7 storms: 209.
+
+## 2026-11-14 — Features, target and splits (rules 6-7, split rules)
+
+Command:
+
+```bash
+python -m src.data.split
+```
+
+Input: `data/processed/tracks.parquet`. Output: `data/processed/train.parquet`, `val.parquet`, `test.parquet`.
+Lags (t-6h, t-12h, t-24h) and target (t+24h) matched by timestamp within SID (merge on SID and
+shifted ISO_TIME), gaps asserted exactly 6/12/24 h. RI = USA_WIND(t+24h) - USA_WIND(t) >= 30 kt.
+
+| Step | Rows | Storms | Rows removed |
+|---|---:|---:|---:|
+| tracks.parquet | 103,228 | 4,256 | |
+| rule 7: has t-24h and t+24h in same SID | 69,091 | 3,788 | 34,137 |
+
+Missing values among the 69,091 kept rows (left missing, not filled): USA_PRES 29,596;
+DPRES_24 29,631; DWIND_6 129; DWIND_12 198; SPEED_12 198; DIR_12 198.
+
+Splits are by storm `SEASON` (one split per SID; asserted no SID in two splits).
+Southern Hemisphere seasons start mid-year, so e.g. SEASON 2016 includes storms from late 2015.
+
+| Split | Subset | Seasons present | Rows | Storms | RI rows | RI rate % | Storms with RI |
+|---|---|---|---:|---:|---:|---:|---:|
+| train | all basins | 1980-2015 | 57,244 | 3,028 | 3,949 | 6.90 | 1,032 |
+| train | Bay of Bengal | 1980-2014 | 989 | 91 | 61 | 6.17 | 17 |
+| val | all basins | 2016-2019 | 5,530 | 326 | 543 | 9.82 | 142 |
+| val | Bay of Bengal | 2016-2019 | 149 | 14 | 13 | 8.72 | 5 |
+| test | all basins | 2020-2025 | 6,317 | 434 | 586 | 9.28 | 152 |
+| test | Bay of Bengal | 2020-2024 | 170 | 19 | 18 | 10.59 | 3 |
+
+Bay of Bengal = BASIN NI and SUBBASIN BB at time t. Rates are over all rows (no over-water filter yet).
+Hand check: 3 random rows (seed 0: VONGFONG 2020, WARREN 1995, EDME 1989) recomputed from the raw CSV
+matched on all 17 fields.
+
+## 2026-11-14 — Over-water RI rates, val and test (DIST2LAND > 0 at t)
+
+CLAUDE.md testing rule: "Evaluate only rows over water (DIST2LAND > 0 at time t)". Split files are
+unchanged; the filter is applied only when computing these numbers.
+
+Command:
+
+```bash
+python -c "
+import pandas as pd
+rows=[]
+for k in ('val','test'):
+    d=pd.read_parquet(f'data/processed/{k}.parquet'); d=d[d.DIST2LAND>0]
+    for name,s in [('all basins',d),('Bay of Bengal',d[(d.BASIN=='NI')&(d.SUBBASIN=='BB')])]:
+        rows.append(dict(split=k,subset=name,rows=len(s),storms=s.SID.nunique(),ri_rows=int(s.RI.sum()),ri_rate=round(100*s.RI.mean(),2),storms_with_ri=s.loc[s.RI==1,'SID'].nunique()))
+print(pd.DataFrame(rows).to_string(index=False))
+"
+```
+
+| Split | Subset | Rows | Storms | RI rows | RI rate % | Storms with RI |
+|---|---|---:|---:|---:|---:|---:|
+| val | all basins | 5,333 | 323 | 539 | 10.11 | 141 |
+| val | Bay of Bengal | 141 | 14 | 13 | 9.22 | 5 |
+| test | all basins | 6,016 | 432 | 581 | 9.66 | 152 |
+| test | Bay of Bengal | 164 | 19 | 18 | 10.98 | 3 |
+
+Bay of Bengal = BASIN NI and SUBBASIN BB at time t.
