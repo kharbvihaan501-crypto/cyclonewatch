@@ -2,16 +2,20 @@
 
 Veritas AI Hackathon 2026, AI + Climate. Deadline Mon 16 Nov 10:29 AM IST.
 
-## What we are building
-One model: the probability that a tropical cyclone rapidly intensifies (RI) in the
-next 24 hours. RI = USA_WIND at t+24h minus USA_WIND at t >= 30 kt.
-Place: Bay of Bengal (BASIN NI, SUBBASIN BB). User: Odisha State Disaster
-Management Authority, deciding whether to escalate a warning now or wait.
-Train on ALL basins (Bay of Bengal has too few storms), report Bay of Bengal results.
-IMD already runs an RI-Index (88 cyclones, 1981-2010, uses SST/shear/humidity);
-we are an open second signal, not a replacement.
-Demo: Gradio + Plotly replay of Cyclone Amphan (2020).
-NOT in scope: track forecasting, cones, district maps, population data.
+## What we are building (UPDATED Sat 14 Nov, 6 PM)
+One model: probability that a tropical cyclone rapidly intensifies (RI) in the next 24 hours. RI = USA_WIND(t+24h) - USA_WIND(t) >= 30 kt. SCOPE: North Indian Ocean only (BASIN "NI": SUBBASIN BB = Bay of Bengal, AS = Arabian Sea). Showcase: Odisha. User: OSDMA, deciding to escalate now or hold. The alert is two-sided: it also says when a storm is NOT likely to blow up. We are a second, open signal beside IMD, not a replacement. IMD predicted Amphan's RI 24 h ahead: never claim IMD missed it.
+
+## Models (three, same settings, same NI test rows)
+MAIN = trained on NI storms only. COMPARISON = all basins. LEAVE-NI-OUT = all basins except NI, no BASIN feature. PRE-REGISTERED CHOICE: before the test run, pick MAIN vs all-basins by higher validation PR-AUC on NI rows (ties go to NI-only). Result: MAIN = NI-ONLY, decided Sat 14 Nov 2026 18:09 (NI-ONLY PR-AUC 0.3158 vs ALL-BASINS 0.2556). Not to be changed. Then run all three on the test set once. Alert levels: red = chosen threshold, amber = half of it, green = below. LEARNING CURVE: NI-only trained on 25/50/75/100% of training STORMS (5 random subsets each, fixed seeds), scored on validation. Nobody reads test.parquet before the freeze.
+
+## Odisha casebook
+Storms (check names in IBTrACS): 1999 super cyclone, PHAILIN 2013, HUDHUD 2014, TITLI 2018, FANI 2019, BULBUL 2019 (pre-2020: leave-one-storm-out retrain on the other NI storms from 1980-2019, label as illustration, NOT a headline metric); AMPHAN 2020, YAAS 2021, GULAB 2021, JAWAD 2021, DANA 2024, MONTHA 2025 (from the frozen test run). MONTHA is provisional data (TRACK_TYPE US-PROVISIONAL), is dropped by cleaning rule 2 and listed under rule 8, so it cannot be in the test run: show it only as a labelled, unscored demo storm, or leave it out.
+
+## Demo
+Gradio + Plotly viewer over precomputed data/processed/predictions.parquet (no live model): storm picker, time slider, alert tile, wind + model probability + persistence chart, top-3 reasons, casebook strip, threshold slider with real hits and false alarms, disclaimer. Fallback: static Plotly HTML + screen recording.
+
+## Out of scope
+Track forecasts, district maps, population data, "lives saved" claims. Climate drift only if time remains, as a labelled global side analysis. USA_WIND is JTWC 1-minute wind, not IMD's official wind: state this as a limit.
 
 ## Data rules
 File: data/raw/ibtracs.since1980.list.v04r01.csv (NOAA IBTrACS v4,
