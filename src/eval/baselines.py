@@ -24,7 +24,7 @@ from src.eval.metrics import (ALERT_BASIN, evaluate, format_table, threshold_for
 
 TRAIN_PATH = "data/processed/train.parquet"
 VAL_PATH = "data/processed/val.parquet"
-RESULTS_LOG = "docs/results_log.md"
+RESULTS_LOG = "docs/results_shaurya.md"  # Shaurya's log; docs/results_log.md is Vihaan's
 SEED = 0
 TARGET = "RI"
 
@@ -90,7 +90,7 @@ def run_matched(mode: str, target: float) -> None:
         cmd = f"py -3.12 -m src.eval.baselines --alert-rate {target:g}"
 
     res = evaluate(val, "P_PERSISTENCE", thr)
-    keep = ["subset", "storms", "RI episodes", "RI rows rise < 30 kt", "episodes caught",
+    keep = ["subset", "storms", "RI episodes", "RI rows rise < 30 kt", "episodes caught", "missed episodes",
             "alert rate %", "red hours / storm", "episodes caught %", "median lead h",
             "false-alarm episodes / storm", "recall (last-24h rise < 30 kt)", "PR-AUC",
             "boot used / skipped"]
