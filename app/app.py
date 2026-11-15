@@ -594,44 +594,61 @@ def make_map(s: pd.DataFrame, i: int, reveal: bool, extra=None) -> go.Figure:
     return fig
 
 
+def _with_gaps(d: pd.DataFrame, col: str) -> tuple[list, list]:
+    """x, y for a line over scored rows, with a break wherever consecutive rows are not 6 h apart
+    (rows over land or without an outcome are not scored, so the line must not bridge them)."""
+    x, y, prev = [], [], None
+    for t, v in zip(d["ISO_TIME"], d[col]):
+        if prev is not None and t - prev != pd.Timedelta(hours=6):
+            x.append(None)
+            y.append(None)
+        x.append(t.strftime("%Y-%m-%d %H:%M"))
+        y.append(None if pd.isna(v) else float(v))
+        prev = t
+    return x, y
+
+
 def make_chart(s: pd.DataFrame, eps: pd.DataFrame, i: int, reveal: bool) -> go.Figure:
-    """Wind (left axis), model and persistence probability (right axis), dashed threshold,
-    observed RI window shaded. Before Reveal: nothing after the chosen time."""
+    """Timeline over the SCORED rows only (rows in predictions.parquet, as in docs/results_test.md):
+    wind (left axis), model P_MAIN and persistence probability (right axis, 0 to 1), red and amber
+    thresholds, RI rows marked, vertical line at the chosen time. Before Reveal nothing after the
+    chosen time is drawn, and an RI row is marked only once its outcome is known (t + 24 h <= now)."""
     now = s["ISO_TIME"].iloc[i]
-    shown = s if reveal else s.iloc[: i + 1]
-    x = _t(shown["ISO_TIME"])
+    sc = s[s["P_MAIN"].notna()]
+    shown = sc if reveal else sc[sc["ISO_TIME"] <= now]
+    ri = shown[shown["RI"] == 1]
+    if not reveal:
+        ri = ri[ri["ISO_TIME"] + pd.Timedelta(hours=24) <= now]
     fig = go.Figure()
-    for _, e in eps.iterrows():
-        # RI at row r = wind rose >= 30 kt over r..r+24h. Before Reveal, a window is shown only once
-        # it can be known at the chosen time (r + 24 h <= now), and it is cut at the chosen time.
-        end = e["END"] + pd.Timedelta(hours=24)
-        if not reveal:
-            if e["START"] + pd.Timedelta(hours=24) > now:
-                continue
-            end = min(end, now)
-        fig.add_vrect(x0=e["START"].strftime("%Y-%m-%d %H:%M"), x1=end.strftime("%Y-%m-%d %H:%M"),
-                      fillcolor="#d62828", opacity=0.14, line_width=0, layer="below")
-    fig.add_trace(go.Scatter(x=x, y=_l(shown["USA_WIND"]), name="wind (kt)", mode="lines+markers",
+    xw, yw = _with_gaps(shown, "USA_WIND")
+    fig.add_trace(go.Scatter(x=xw, y=yw, name="wind (kt)", mode="lines+markers",
                              line=dict(color="#1d3557", width=2.5), marker=dict(size=5)))
-    fig.add_trace(go.Scatter(x=x, y=_l(shown["P_MAIN"]), name="model RI probability", yaxis="y2",
+    xp, yp = _with_gaps(shown, "P_MAIN")
+    fig.add_trace(go.Scatter(x=xp, y=yp, name="model RI probability (P_MAIN)", yaxis="y2",
                              mode="lines+markers", line=dict(color="#d62828", width=2.5), marker=dict(size=5)))
-    fig.add_trace(go.Scatter(x=x, y=_l(shown["P_PERSISTENCE"]), name="persistence probability",
-                             yaxis="y2", mode="lines", line=dict(color="#6c757d", width=2, dash="dot")))
-    full = _t(s["ISO_TIME"])
-    fig.add_trace(go.Scatter(x=[full[0], full[-1]], y=[MODEL.threshold] * 2, yaxis="y2", mode="lines",
-                             name=f"alert threshold {MODEL.threshold:.3f}",
-                             line=dict(color="#d62828", width=1.5, dash="dash")))
-    fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers", name="observed RI window",
-                             marker=dict(size=12, symbol="square", color="rgba(214,40,40,0.3)")))
+    xq, yq = _with_gaps(shown, "P_PERSISTENCE")
+    fig.add_trace(go.Scatter(x=xq, y=yq, name="persistence probability", yaxis="y2", mode="lines",
+                             line=dict(color="#6c757d", width=2, dash="dash")))
+    fig.add_trace(go.Scatter(x=_t(ri["ISO_TIME"]), y=_l(ri["P_MAIN"]), yaxis="y2", mode="markers",
+                             name="RI row (wind rose ≥ 30 kt in the next 24 h)",
+                             marker=dict(symbol="star", size=14, color="#d62828",
+                                         line=dict(width=1, color="black"))))
+    t0 = min(sc["ISO_TIME"].min(), now) if len(sc) else now
+    t1 = max(sc["ISO_TIME"].max(), now) if len(sc) else now
+    span = [_t([t0])[0], _t([t1])[0]]
+    for y, name, col in ((MODEL.threshold, f"red threshold {MODEL.threshold:.6f}", COLOURS["red"]),
+                         (MODEL.amber_from, f"amber threshold {MODEL.amber_from:.6f}", COLOURS["amber"])):
+        fig.add_trace(go.Scatter(x=span, y=[y, y], yaxis="y2", mode="lines", name=name, hoverinfo="skip",
+                                 line=dict(color=col, width=1.5, dash="dot")))
     fig.add_vline(x=_t([now])[0], line=dict(color="#1d3557", width=1.5, dash="dash"))
-    pmax = np.nanmax([s["P_MAIN"].max(), s["P_PERSISTENCE"].max(), MODEL.threshold, 0.1])
-    wmax = float(s["USA_WIND"].max())
+    wmax = float(sc["USA_WIND"].max()) if len(sc) else float(s["USA_WIND"].max())
+    pad = pd.Timedelta(hours=3)
     fig.update_layout(
-        height=340, margin=dict(l=10, r=10, t=10, b=10), hovermode="x unified",
-        xaxis=dict(range=[full[0], full[-1]]),
+        height=360, margin=dict(l=10, r=10, t=10, b=10), hovermode="x unified",
+        xaxis=dict(range=[_t([t0 - pad])[0], _t([t1 + pad])[0]]),
         yaxis=dict(title="wind (kt)", range=[0, 1.1 * wmax]),
-        yaxis2=dict(title="RI probability", overlaying="y", side="right", tickformat=".0%",
-                    range=[0, min(1.0, 1.15 * pmax)], showgrid=False),
+        yaxis2=dict(title="RI probability", overlaying="y", side="right", range=[0, 1],
+                    tickformat=".0%", showgrid=False),
         legend=dict(orientation="h", y=-0.22))
     return fig
 
@@ -793,11 +810,10 @@ def build() -> gr.Blocks:
                 t = gr.Slider(minimum=0, maximum=max(len(s0) - 1, 1), value=i0, step=1, label=time_label(s0))
                 label = gr.HTML(v0[4])
                 fmap = gr.Plot(value=v0[0], elem_id="replay-map", show_label=False)
+                chart = gr.Plot(value=v0[1], label="Timeline: wind and RI probability (scored rows only)")
                 with gr.Row():
                     with gr.Column(scale=1, min_width=260):
                         panel = gr.HTML(v0[2])
-                    with gr.Column(scale=2, min_width=420):
-                        chart = gr.Plot(value=v0[1], label="Timeline: wind and RI probability")
                     with gr.Column(scale=1, min_width=260):
                         reveal_btn = gr.Button("Reveal what happened next", variant="primary")
                         outcome = gr.Markdown(v0[3])
