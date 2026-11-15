@@ -883,12 +883,12 @@ def on_storm(sid: str):
 
 def casebook_line(sid: str) -> str:
     """One line per storm, computed from its saved predictions.parquet rows (same episodes as storm_view)."""
-    s, eps, _ = storm_view(sid)
+    s, eps, fa = storm_view(sid)  # fa = false-alarm episodes (red runs with no RI row), as in results_test.md
     sc = s[s["P_MAIN"].notna()]
     if eps.empty:
         n = int((sc["ALERT"] == "red").sum())
-        return (f"no RI episode, {n} red row{'s' if n != 1 else ''} (false alarm)" if n
-                else "no RI episode, no red rows")
+        return (f"No RI episode. {fa} false-alarm episode{'s' if fa != 1 else ''} "
+                f"({n} red row{'s' if n != 1 else ''})" if n else "no RI episode, no red rows")
     parts = []
     for _, e in eps.iterrows():
         if e["CAUGHT"]:
@@ -924,6 +924,68 @@ def on_time(sid: str, i: float):
 
 def on_reveal(sid: str, i: float):
     return (True, *render(sid, i, True))
+
+
+# =============================================================== threshold explorer (test rows)
+EXPLORE_TITLE = "Explore the alert threshold (exploration only, not tuned)"
+EXPLORE_NOTE = ("The frozen setting stays the default. Moving this slider shows how the same model would "
+                "have done on the 2020+ test storms at other cut-offs. It is not a re-tuned model, and the "
+                "numbers are on only 9 episodes.")
+
+
+def _explore_rows() -> pd.DataFrame:
+    """The saved scored test rows (predictions.parquet: NI, over water, t-24h and t+24h known)."""
+    d = PRED.copy()
+    if "DIST2LAND" not in d:  # live fallback rows are already over-water only
+        d["DIST2LAND"] = 1.0
+    return d
+
+
+EXPLORE = _explore_rows()
+FROZEN_PERS = PERS_RED  # frozen persistence threshold (docs/freeze.md)
+FROZEN_RATE = float((EXPLORE["P_MAIN"] >= MODEL.threshold).mean())  # share of test rows red, frozen MAIN
+FROZEN_SLIDER = round(100 * FROZEN_RATE, 1)  # slider default (%), marks the frozen setting
+
+
+def explore_scores(prob_col: str, thr: float) -> dict:
+    """Row alert rate, episodes red at the first RI row / at any RI row, false-alarm episodes per storm."""
+    d = EXPLORE.assign(_P=EXPLORE[prob_col])
+    eps, storms = episode_alerts(d, "_P", thr)
+    red = d[d["_P"] >= thr]
+    any_red = sum(bool(((red["SID"] == e["SID"]) & red["ISO_TIME"].between(e["START"], e["END"])).any())
+                  for _, e in eps.iterrows())
+    return {"thr": thr, "rate": float((d["_P"] >= thr).mean()), "first": int(eps["CAUGHT"].sum()),
+            "any": any_red, "n_eps": len(eps),
+            "fa": storms["N_FALSE_ALARMS"].sum() / len(storms), "n_storms": len(storms)}
+
+
+def explore_thresholds(pct: float) -> tuple[float, float, bool]:
+    """(MAIN threshold, persistence threshold, is_frozen). At the default position the frozen
+    thresholds are used exactly; elsewhere the threshold that puts pct% of the test rows on red
+    (threshold_for_alert_rate on these rows, all NI; persistence moves in 5 kt steps, so its rate is
+    the nearest it can reach)."""
+    if abs(pct - FROZEN_SLIDER) < 1e-6:
+        return MODEL.threshold, FROZEN_PERS, True
+    m, _ = threshold_for_alert_rate(EXPLORE, "P_MAIN", pct / 100, basin=None)
+    p, _ = threshold_for_alert_rate(EXPLORE, "P_PERSISTENCE", pct / 100, basin=None)
+    return m, p, False
+
+
+def explore_md(pct: float) -> str:
+    m_thr, p_thr, frozen = explore_thresholds(float(pct))
+    m, p = explore_scores("P_MAIN", m_thr), explore_scores("P_PERSISTENCE", p_thr)
+    head = ("**Frozen setting (default)**: the thresholds used in docs/results_test.md." if frozen else
+            f"**Exploration at {pct:.1f}% of test rows red**: NOT the frozen setting.")
+    n, s = m["n_eps"], m["n_storms"]
+    rows = [("Red threshold in use", f"{m['thr']:.6f}", f"{p['thr']:.6f}"),
+            ("% of rows red", f"{m['rate']:.1%}", f"{p['rate']:.1%}"),
+            (f"RI episodes caught at the first RI row (of {n})", f"{m['first']} of {n}", f"{p['first']} of {n}"),
+            (f"RI episodes red at any RI row (of {n})", f"{m['any']} of {n}", f"{p['any']} of {n}"),
+            ("False-alarm episodes per storm", f"{m['fa']:.2f}", f"{p['fa']:.2f}")]
+    table = "| | MAIN (NI-ONLY) | Persistence |\n|---|---:|---:|\n" + "\n".join(
+        f"| {a} | {b} | {c} |" for a, b, c in rows)
+    return (f"{head}\n\n{table}\n\n_{len(EXPLORE)} over-water NI test rows, {s} storms, {n} RI episodes, "
+            f"from {_rel(PRED_PATH)}._")
 
 
 # ========================================================================== UI
@@ -979,6 +1041,15 @@ def build() -> gr.Blocks:
                         reveal_btn = gr.Button("Reveal what happened next", variant="primary")
                         outcome = gr.Markdown(v0[3])
                 exposure = gr.HTML(v0[5])
+                with gr.Accordion(EXPLORE_TITLE, open=False):
+                    gr.Markdown(f"**{EXPLORE_NOTE}**")
+                    rate = gr.Slider(minimum=5, maximum=40, value=FROZEN_SLIDER, step=0.1,
+                                     label=f"Red alert rate, % of NI over-water test rows (default {FROZEN_SLIDER}% "
+                                           f"= frozen threshold {MODEL.threshold:.6f})")
+                    reset = gr.Button(f"Back to the frozen setting ({FROZEN_SLIDER}%)", size="sm")
+                    explore_out = gr.Markdown(explore_md(FROZEN_SLIDER))
+                    rate.change(explore_md, rate, explore_out)
+                    reset.click(lambda: FROZEN_SLIDER, None, rate)
                 gr.Markdown(f"**{DISCLAIMER}**")
                 revealed = gr.State(False)
                 outs = [fmap, chart, panel, outcome, label, exposure]
