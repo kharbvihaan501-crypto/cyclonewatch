@@ -377,8 +377,10 @@ SAFETY = ("Low RI likelihood does NOT mean the cyclone is safe. "
 RETRO = ("Retrospective experiment: predictions made with the frozen model using only data "
          "available at each time.")
 DEMO_FIRST = [("AMPHAN", 2020), ("DANA", 2024), ("YAAS", 2021), ("GULAB", 2021), ("JAWAD", 2021)]
-SUCCESS_CASE = ("AMPHAN", 2020)
-FALSE_ALARM_CASE = ("DANA", 2024)
+CASEBOOK = [("Odisha cases", [("AMPHAN", 2020), ("YAAS", 2021), ("GULAB", 2021), ("JAWAD", 2021),
+                               ("DANA", 2024)]),
+            ("Other test storms", [("TAUKTAE", 2021), ("BIPARJOY", 2023), ("GATI", 2020)])]
+CASEBOOK_LABEL = "Test-period storms (2020 on), scored by the frozen model. Not tuned on these."
 BOB_VIEW = dict(lat=(6.0, 24.2), lon=(79.0, 97.0))  # Bay of Bengal + the Eastern India towns
 # Label positions so close-together towns do not overlap on the map (default: middle right).
 TOWN_LABEL_POS = {"Puri": "bottom center", "Bhubaneswar": "middle left", "Cuttack": "top right",
@@ -767,6 +769,43 @@ def on_storm(sid: str):
             False, *render(sid, i, False))
 
 
+def casebook_line(sid: str) -> str:
+    """One line per storm, computed from its saved predictions.parquet rows (same episodes as storm_view)."""
+    s, eps, _ = storm_view(sid)
+    sc = s[s["P_MAIN"].notna()]
+    if eps.empty:
+        n = int((sc["ALERT"] == "red").sum())
+        return (f"no RI episode, {n} red row{'s' if n != 1 else ''} (false alarm)" if n
+                else "no RI episode, no red rows")
+    parts = []
+    for _, e in eps.iterrows():
+        if e["CAUGHT"]:
+            lead = abs(float(e["LEAD_H"]))
+            parts.append(f"red {lead:.0f} h before the first RI row" if lead > 0
+                         else "red at the first RI row (0 h before)")
+        elif e["RED_DURING"]:
+            ep = sc[(sc["ISO_TIME"] >= e["START"]) & (sc["ISO_TIME"] <= e["END"]) & (sc["ALERT"] == "red")]
+            late = (ep["ISO_TIME"].min() - e["START"]).total_seconds() / 3600
+            parts.append(f"red late by {late:.0f} h")
+        else:
+            parts.append("never red")
+    if len(parts) == 1:
+        return parts[0]
+    return "; ".join(f"RI episode {k}: {p}" for k, p in enumerate(parts, 1))
+
+
+def on_case(sid: str):
+    """Casebook button: select the storm and reset the slider to its first scored row."""
+    return (sid, *on_storm(sid))
+
+
+def _case_handler(sid: str):
+    """A no-argument click handler bound to one storm (Gradio calls it with no inputs)."""
+    def handler():
+        return on_case(sid)
+    return handler
+
+
 def on_time(sid: str, i: float):
     return (False, *render(sid, i, False))
 
@@ -794,19 +833,29 @@ def build() -> gr.Blocks:
     s0, _, _ = storm_view(first)
     i0 = default_index(first)
     v0 = render(first, i0, False)
-    success_sid, fa_sid = sid_of(*SUCCESS_CASE), sid_of(*FALSE_ALARM_CASE)
     with gr.Blocks(title="CycloneWatch") as demo:
         gr.Markdown(f"# {TITLE}")
         with gr.Tabs():
             with gr.Tab("Check it on a past storm"):
                 model_header()
+                gr.Markdown(f"### Casebook\n**{CASEBOOK_LABEL}**")
+                case_buttons = []
+                for group, cases in CASEBOOK:
+                    gr.Markdown(f"**{group}**")
+                    with gr.Row(equal_height=True):
+                        for name, season in cases:
+                            sid = sid_of(name, season)
+                            if sid is None:
+                                continue
+                            with gr.Column(min_width=150):
+                                b = gr.Button(f"{name.title()} {season}", size="sm")
+                                gr.Markdown(f"<span style='font-size:13px'>{casebook_line(sid)}</span>")
+                            case_buttons.append((b, sid))
                 gr.Markdown("This replays a real storm to check the model's predictions against "
                             "what actually happened.")
                 with gr.Row(equal_height=True):
-                    b_success = gr.Button("Success case: Amphan 2020", variant="primary", scale=1)
-                    b_fa = gr.Button("False alarm: Dana 2024", variant="secondary", scale=1)
-                    storm = gr.Dropdown(choices=STORM_CHOICES, value=first, scale=2,
-                                        label="Storm (casebook first: Amphan, Dana, Yaas, Gulab, Jawad)")
+                    storm = gr.Dropdown(choices=STORM_CHOICES, value=first,
+                                        label="Storm (all 26 North Indian Ocean test storms; casebook first)")
                 t = gr.Slider(minimum=0, maximum=max(len(s0) - 1, 1), value=i0, step=1, label=time_label(s0))
                 label = gr.HTML(v0[4])
                 fmap = gr.Plot(value=v0[0], elem_id="replay-map", show_label=False)
@@ -824,10 +873,8 @@ def build() -> gr.Blocks:
                 storm.change(on_storm, storm, [t, revealed, *outs])
                 t.change(on_time, [storm, t], [revealed, *outs])
                 reveal_btn.click(on_reveal, [storm, t], [revealed, *outs])
-                if success_sid:
-                    b_success.click(lambda: success_sid, None, storm)
-                if fa_sid:
-                    b_fa.click(lambda: fa_sid, None, storm)
+                for b, sid in case_buttons:
+                    b.click(_case_handler(sid), None, [storm, t, revealed, *outs])
 
             with gr.Tab("Forecast a storm now"):
                 model_header()
