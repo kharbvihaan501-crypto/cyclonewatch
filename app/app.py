@@ -440,6 +440,23 @@ def sid_of(name: str, season: int) -> str | None:
     return m["SID"].iloc[0] if len(m) else None
 
 
+NOT_SCORED_NAMES = {"land": "over land (not scored)",
+                    "outcome": "no outcome: no reading 24 h later (not scored)",
+                    "history": "no forecast: needs a reading 24 h earlier",
+                    "other": "not in the saved test rows (not scored)"}
+
+
+def _not_scored_reason(r: pd.Series) -> str:
+    """Why a replay row has no saved prediction. Over land is checked first."""
+    if r["DIST2LAND"] <= 0:
+        return "land"
+    if not r["HAS24"]:
+        return "history"
+    if not r["HAS_OUTCOME"]:
+        return "outcome"
+    return "other"
+
+
 @lru_cache(maxsize=64)
 def storm_view(sid: str):
     """Track rows of one storm with saved predictions attached, plus RI episodes (scored rows only)."""
@@ -450,6 +467,11 @@ def storm_view(sid: str):
     s = s.merge(p[keep], on="ISO_TIME", how="left").sort_values("ISO_TIME").reset_index(drop=True)
     s["ALERT"] = s["ALERT"].fillna("none")
     s["HAS24"] = (s["ISO_TIME"] - pd.Timedelta(hours=24)).isin(set(s["ISO_TIME"]))
+    s["OVER_WATER"] = s["DIST2LAND"] > 0
+    s["HAS_OUTCOME"] = s["TIME_P24"].notna()
+    # Unscored rows (no saved prediction) say why; they are never part of hits, false alarms or lead times.
+    s["NOT_SCORED"] = [None if pd.notna(p) else _not_scored_reason(r)
+                       for p, (_, r) in zip(s["P_MAIN"], s.iterrows())]
     sc = s[s["P_MAIN"].notna()].copy()
     if len(sc):
         # Caught / lead time from the saved alert colours (red = 1), so the replay matches the test run.
@@ -499,14 +521,17 @@ def make_map(s: pd.DataFrame, i: int, reveal: bool, extra=None) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(go.Scattergeo(lat=_l(shown["LAT"]), lon=_l(shown["LON"]), mode="lines",
                                 hoverinfo="skip", line=dict(width=2.5, color="#555"), showlegend=False))
-    names = {"green": "green", "amber": "amber", "red": "red", "none": "no saved prediction"}
-    for lvl, col in COLOURS.items():
-        d = shown[shown["ALERT"] == lvl]
+    groups = [(lvl, COLOURS[lvl], shown["ALERT"] == lvl, lvl, "circle") for lvl in ("green", "amber", "red")]
+    groups += [(NOT_SCORED_NAMES[k], COLOURS["none"], shown["NOT_SCORED"] == k, "none",
+                "x" if k == "land" else "circle-open") for k in ("land", "outcome", "history", "other")]
+    for name, col, mask, lvl, sym in groups:
+        d = shown[mask]
         if d.empty:
             continue
         fig.add_trace(go.Scattergeo(
-            lat=_l(d["LAT"]), lon=_l(d["LON"]), mode="markers", name=names[lvl],
-            marker=dict(size=11, color=col, line=dict(width=0.6, color="black")),
+            lat=_l(d["LAT"]), lon=_l(d["LON"]), mode="markers", name=name,
+            marker=dict(size=11, color=col, symbol=sym,
+                        line=dict(width=2, color=col) if lvl == "none" else dict(width=0.6, color="black")),
             text=[f"{t:%d %b %H:%M} UTC<br>wind {w:.0f} kt<br>RI likelihood "
                   + ("–" if pd.isna(p) else f"{p:.0%}")
                   for t, w, p in zip(d["ISO_TIME"], d["USA_WIND"], d["P_MAIN"])],
@@ -596,9 +621,7 @@ def now_panel(s: pd.DataFrame, i: int) -> str:
     words = {"red": "RED: much more likely than usual", "amber": "AMBER: more likely than usual",
              "green": "GREEN: less likely than usual", "none": "No saved prediction at this time"}
     if pd.isna(p):
-        why = ("needs a reading from 24 h earlier" if not r["HAS24"] else
-               "over land" if r["DIST2LAND"] <= 0 else
-               "the test run only scored rows whose wind 24 h later is known")
+        why = NOT_SCORED_NAMES[r["NOT_SCORED"]]
         prob = f"<div style='font-size:14px;color:#fff !important'>({why})</div>"
     else:
         prob = (f"<div style='font-size:48px;font-weight:800;line-height:1.05;color:#fff !important'>"
@@ -622,8 +645,12 @@ def outcome_md(s: pd.DataFrame, eps: pd.DataFrame, fa: int, i: int, reveal: bool
     r = s.iloc[i]
     nxt = r["USA_WIND_P24"] - r["USA_WIND"]
     lines = ["**What happened next**",
-             "Wind 24 h after the chosen time: " + ("not in the track" if pd.isna(nxt) else
+             "Wind 24 h after the chosen time: " + ("**no outcome** (no reading 24 h later; not scored)"
+                                                   if pd.isna(nxt) else
                                                    f"{r['USA_WIND_P24']:.0f} kt ({nxt:+.0f} kt)")]
+    if not r["OVER_WATER"]:
+        lines.append("This time is **over land**: it is not scored and not counted in hits, "
+                     "false alarms or lead times.")
     if eps.empty:
         lines.append("No rapid strengthening (rise of 30 kt or more in 24 h) on this storm's scored rows.")
     for _, e in eps.iterrows():
