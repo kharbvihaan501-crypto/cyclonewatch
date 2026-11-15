@@ -384,7 +384,7 @@ RETRO = ("Retrospective experiment: predictions made with the frozen model using
 DEMO_FIRST = [("AMPHAN", 2020), ("DANA", 2024), ("YAAS", 2021), ("GULAB", 2021), ("JAWAD", 2021)]
 SUCCESS_CASE = ("AMPHAN", 2020)
 FALSE_ALARM_CASE = ("DANA", 2024)
-BOB_VIEW = dict(lat=(6.0, 24.2), lon=(79.0, 97.0))  # Bay of Bengal + the Eastern India towns
+BOB_VIEW = dict(lat=(6.0, 25.0), lon=(79.0, 97.0))  # Bay of Bengal + Eastern India towns, room for labels
 MAP_ASPECT = 1.93  # map box width / height at 70vh on a 16:9 laptop window (measured in the browser)
 
 
@@ -546,15 +546,19 @@ HALO = "-1px -1px 1px #fff, 1px -1px 1px #fff, -1px 1px 1px #fff, 1px 1px 1px #f
 MAP_PX_W = 1165.0
 CHAR_PX, TEXT_H, GAP, MARK_PX = 6.2, 14.0, 5.0, 9.0
 PAD = 2.5  # safety margin around each label: covers small offset differences in the browser
+# Measured against Plotly's own projection (gd._fullLayout.geo._subplot.projection) in the browser:
+# x matches to 0.05 px; Plotly draws everything Y_SHIFT px higher, and the geo box is 607 px tall.
+Y_SHIFT, H_EXTRA = -5.35, 2.4
 _POS = ["middle right", "middle left", "top center", "bottom center",
         "top right", "bottom right", "top left", "bottom left"]
 
 
-def _label_box(x: float, y: float, w: float, pos: str) -> tuple:
-    """Pixel box (x0, y0, x1, y1) of a label at marker (x, y) for a Plotly textposition."""
+def _label_box(x: float, y: float, w: float, pos: str, gap: float = GAP) -> tuple:
+    """Pixel box (x0, y0, x1, y1) of a label at point (x, y) for a Plotly textposition. gap = GAP for
+    labels next to a marker; 0 for text-only (leader) labels, which Plotly draws right at the point."""
     v, h = pos.split()
-    x0 = {"left": x - GAP - w, "center": x - w / 2, "right": x + GAP}[h]
-    y0 = {"top": y - GAP - TEXT_H, "middle": y - TEXT_H / 2, "bottom": y + GAP}[v]
+    x0 = {"left": x - gap - w, "center": x - w / 2, "right": x + gap}[h]
+    y0 = {"top": y - gap - TEXT_H, "middle": y - TEXT_H / 2, "bottom": y + gap}[v]
     return (x0, y0, x0 + w, y0 + TEXT_H)
 
 
@@ -569,8 +573,8 @@ def layout_labels(towns: list[dict], lat_r: tuple, lon_r: tuple) -> dict:
     Returns {town: ("pos", textposition) or ("leader", label_lat, label_lon, textposition)}."""
     k = MAP_PX_W / (lon_r[1] - lon_r[0])
     top = _merc(lat_r[1])
-    xy = {r["town"]: ((r["lon"] - lon_r[0]) * k, (top - _merc(r["lat"])) * k) for r in towns}
-    H = (top - _merc(lat_r[0])) * k
+    xy = {r["town"]: ((r["lon"] - lon_r[0]) * k, (top - _merc(r["lat"])) * k + Y_SHIFT) for r in towns}
+    H = (top - _merc(lat_r[0])) * k + H_EXTRA
     marks = {t: (x - MARK_PX / 2, y - MARK_PX / 2, x + MARK_PX / 2, y + MARK_PX / 2) for t, (x, y) in xy.items()}
     placed, out = [], {}
 
@@ -593,13 +597,13 @@ def layout_labels(towns: list[dict], lat_r: tuple, lon_r: tuple) -> dict:
             out[r["town"]] = ("pos", best)
             continue
         choice = None
-        for dist in (24, 36, 50, 66):  # leader line: move the label out, try 8 directions
-            for ang in range(0, 360, 45):
+        for dist in (22, 32, 44, 58, 74, 92, 112, 135, 160):  # leader line: move the label out, 12 directions
+            for ang in range(0, 360, 30):
                 lx, ly = x + dist * np.cos(np.radians(ang)), y - dist * np.sin(np.radians(ang))
                 p = "middle right" if np.cos(np.radians(ang)) > 0.1 else (
                     "middle left" if np.cos(np.radians(ang)) < -0.1 else
                     ("top center" if np.sin(np.radians(ang)) > 0 else "bottom center"))
-                b = _label_box(lx, ly, w, p)
+                b = _label_box(lx, ly, w, p, gap=0.0)
                 if cost(b, r["town"]) == 0 and not _hits(b, marks[r["town"]]):
                     choice = (lx, ly, p, b)
                     break
@@ -612,7 +616,7 @@ def layout_labels(towns: list[dict], lat_r: tuple, lon_r: tuple) -> dict:
         lx, ly, p, b = choice
         placed.append(b)
         inv = lambda yy: float(np.degrees(2 * np.arctan(np.exp(np.radians(yy))) - np.pi / 2))  # noqa: E731
-        out[r["town"]] = ("leader", inv(top - ly / k), lon_r[0] + lx / k, p)
+        out[r["town"]] = ("leader", inv(top - (ly - Y_SHIFT) / k), lon_r[0] + lx / k, p)
     return out
 
 
