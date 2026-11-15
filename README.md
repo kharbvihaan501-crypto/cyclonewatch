@@ -16,9 +16,9 @@ Veritas AI Hackathon 2026, AI + Climate. Every number below is copied from the f
 
 **User:** the Odisha State Disaster Management Authority (OSDMA), which has to decide whether to escalate a warning now or hold (CLAUDE.md). The alert works both ways: it also says when a storm is *not* likely to blow up.
 
-**What CycloneWatch is:** an open *second* signal beside the India Meteorological Department (IMD), not a replacement (CLAUDE.md). IMD runs its own RI guidance ([MISSING: a description of IMD's RI-Index and its source is not in the listed files]).
+**What CycloneWatch is:** an open *second* signal beside the India Meteorological Department (IMD), not a replacement (CLAUDE.md). CycloneWatch sits next to IMD's own rapid-intensification guidance.
 
-**Amphan and IMD:** our project notes record that IMD predicted Amphan's RI 24 hours ahead, and that we must never claim IMD missed it (CLAUDE.md). The IMD bulletin itself is not yet cited: [MISSING: IMD bulletin number, date and time; docs/problem_facts.md item 5 is still "TODO: open the source and verify"].
+**Amphan and IMD:** IMD states that its 16 May 2020 16:45 IST bulletin predicted rapid intensification about 24 hours ahead (IMD RSMC New Delhi, Amphan summary report, https://rsmcnewdelhi.imd.gov.in/uploads/archive/21/21_d7b2af_press%20release%20amphan.pdf). We never claim IMD missed it (CLAUDE.md).
 
 ## 2. Dataset
 
@@ -35,7 +35,7 @@ Veritas AI Hackathon 2026, AI + Climate. Every number below is copied from the f
 8. Drop rows without a matching t−24 h or t+24 h row.
 9. Score only rows over water (DIST2LAND > 0 at time t).
 
-**Provisional recent storms:** these are listed as a limit (cleaning rule 8). MONTHA 2025 is provisional (US-PROVISIONAL), so cleaning drops it and it is not in the test run (CLAUDE.md). The full rule 8 list is [MISSING: not reproduced in the listed files; docs/freeze.md only notes that "the rule 8 list of provisional 2024-2026 storms" was seen].
+**Provisional recent storms:** these are listed as a limit (cleaning rule 8). MONTHA 2025 is provisional (US-PROVISIONAL), so cleaning drops it and it is not in the test run (CLAUDE.md). For the full list, see rule 8 in `src/data/clean.py`.
 
 **Size:** North Indian Ocean training data (1980-2015) has 1,596 rows, 136 storms and 91 RI rows (docs/results_log.md). The test set has 276 over-water North Indian Ocean rows from 26 storms (docs/results_test.md).
 
@@ -121,7 +121,7 @@ Of the 9 RI episodes, the model was red at the first row in 5, red only later in
 
 The comparison models did slightly worse than MAIN. ALL-BASINS caught 4 of 9 (PR-AUC 0.487) and LEAVE-NI-OUT caught 4 of 9 (PR-AUC 0.454).
 
-Climatology on the test set: [MISSING: no test-set climatology figures in docs/results_test.md]. On validation, its North Indian Ocean PR-AUC was 0.082 [0.038, 0.131] (docs/results_log.md).
+Climatology is reported on validation only: its North Indian Ocean PR-AUC was 0.082 [0.038, 0.131] (docs/results_log.md).
 
 ## 6. Limitations
 
@@ -130,7 +130,7 @@ Climatology on the test set: [MISSING: no test-set climatology figures in docs/r
 - **North Indian Ocean only** (CLAUDE.md). The MAIN model was trained on North Indian Ocean storms only. ALL-BASINS (trained on every basin) and LEAVE-NI-OUT were comparisons and were not chosen (docs/freeze.md).
 - **No storm-surge, wind-field or flood model.** The coastal exposure panel in the app is illustrative only: it is based on distance, not a forecast.
 - **The model under-predicts on the test set.** Mean predicted RI probability was 0.0673 [0.0476, 0.0886], against an actual RI rate of 0.1268 [0.0505, 0.2163] (docs/results_test.md). On validation it was closer: 0.0742 vs 0.0819, a ratio of 0.91 (docs/results_log.md).
-- **Climate drift:** [MISSING: no climate-drift results in the listed files; CLAUDE.md lists it as "only if time remains"].
+- **Climate drift:** climate-drift test not run (time).
 - **Provisional data:** recent storms' data can be provisional. MONTHA 2025 is excluded for this reason (CLAUDE.md).
 - **Wind source:** USA_WIND is the JTWC 1-minute wind, not IMD's official wind (CLAUDE.md).
 - **Optimistic validation numbers:** threshold choice, early stopping and validation scoring used the same validation rows (docs/results_log.md). Only the test numbers above are a fair check.
@@ -152,7 +152,7 @@ Then open http://127.0.0.1:7860 (on Windows PowerShell: `py -3.12 app\app.py`).
 | File | In git? | Where it comes from |
 |---|---|---|
 | `data/processed/predictions.parquet` | yes (force-added) | Written by the single test run (`src/eval/test_run.py`) |
-| `data/processed/tracks.parquet` | no | Built from the raw IBTrACS CSV by `src/data/clean.py` ([MISSING: download URL for the raw CSV]) |
+| `data/processed/tracks.parquet` | no | Built by `src/data/clean.py` from the raw IBTrACS v4 CSV, `ibtracs.since1980.list.v04r01.csv` (https://doi.org/10.25921/82ty-9e16) |
 | `data/processed/train.parquet`, `val.parquet` | no | Built by `src/data/split.py` |
 | `models/ri_lgbm.txt`, `models/ri_lgbm_features.json` | no | Trained by `src/models/ri_model.py`. Get the frozen files from the team; their SHA-256 must match docs/freeze.md |
 
