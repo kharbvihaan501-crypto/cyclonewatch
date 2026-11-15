@@ -1,0 +1,3 @@
+models/* -text
+*.json -text
+*.parquet binary
