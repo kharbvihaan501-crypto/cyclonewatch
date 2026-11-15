@@ -1,28 +1,28 @@
-town,state,lat,lon,coastal
-Puri,Odisha,19.81,85.83,yes
-Paradip,Odisha,20.32,86.61,yes
-Gopalpur,Odisha,19.26,84.91,yes
-Balasore,Odisha,21.49,86.93,yes
-Berhampur,Odisha,19.31,84.79,yes
-Bhubaneswar,Odisha,20.30,85.82,no
-Cuttack,Odisha,20.46,85.88,no
-Angul,Odisha,20.84,85.10,no
-Sambalpur,Odisha,21.47,83.97,no
-Keonjhar,Odisha,21.63,85.58,no
-Digha,West Bengal,21.63,87.51,yes
-Bakkhali,West Bengal,21.56,88.26,yes
-Haldia,West Bengal,22.06,88.07,yes
-Kolkata,West Bengal,22.57,88.36,no
-Kharagpur,West Bengal,22.35,87.32,no
-Durgapur,West Bengal,23.52,87.31,no
-Visakhapatnam,Andhra Pradesh,17.69,83.22,yes
-Srikakulam,Andhra Pradesh,18.30,83.90,yes
-Kakinada,Andhra Pradesh,16.99,82.25,yes
-Machilipatnam,Andhra Pradesh,16.19,81.14,yes
-Vijayawada,Andhra Pradesh,16.51,80.65,no
-Ranchi,Jharkhand,23.34,85.31,no
-Jamshedpur,Jharkhand,22.80,86.20,no
-Dhanbad,Jharkhand,23.80,86.43,no
-Raipur,Chhattisgarh,21.25,81.63,no
-Jagdalpur,Chhattisgarh,19.08,82.02,no
-Bilaspur,Chhattisgarh,22.08,82.15,no
+town,state,lat,lon,coastal,label_pos
+Puri,Odisha,19.81,85.83,yes,bottom center
+Paradip,Odisha,20.32,86.61,yes,middle right
+Gopalpur,Odisha,19.26,84.91,yes,bottom right
+Balasore,Odisha,21.49,86.93,yes,bottom left
+Berhampur,Odisha,19.31,84.79,yes,top left
+Bhubaneswar,Odisha,20.30,85.82,no,bottom left
+Cuttack,Odisha,20.46,85.88,no,top right
+Angul,Odisha,20.84,85.10,no,middle left
+Sambalpur,Odisha,21.47,83.97,no,middle left
+Keonjhar,Odisha,21.63,85.58,no,top center
+Digha,West Bengal,21.63,87.51,yes,bottom center
+Bakkhali,West Bengal,21.56,88.26,yes,bottom right
+Haldia,West Bengal,22.06,88.07,yes,middle right
+Kolkata,West Bengal,22.57,88.36,no,top right
+Kharagpur,West Bengal,22.35,87.32,no,middle left
+Durgapur,West Bengal,23.52,87.31,no,middle right
+Visakhapatnam,Andhra Pradesh,17.69,83.22,yes,middle right
+Srikakulam,Andhra Pradesh,18.30,83.90,yes,middle right
+Kakinada,Andhra Pradesh,16.99,82.25,yes,middle right
+Machilipatnam,Andhra Pradesh,16.19,81.14,yes,middle right
+Vijayawada,Andhra Pradesh,16.51,80.65,no,middle left
+Ranchi,Jharkhand,23.34,85.31,no,middle left
+Jamshedpur,Jharkhand,22.80,86.20,no,top left
+Dhanbad,Jharkhand,23.80,86.43,no,top right
+Raipur,Chhattisgarh,21.25,81.63,no,middle left
+Jagdalpur,Chhattisgarh,19.08,82.02,no,middle left
+Bilaspur,Chhattisgarh,22.08,82.15,no,middle left

@@ -41,8 +41,13 @@ from src.models.ri_model import apply_platt  # noqa: E402
 # yes/no flag from app/towns.csv (coordinates and states checked against Wikipedia, 15 Nov 2026).
 TOWNS = pd.read_csv(Path(__file__).resolve().parent / "towns.csv")
 assert set(TOWNS["coastal"]) <= {"yes", "no"}, "towns.csv: coastal must be yes or no"
+_ROTATE = ["top right", "bottom right", "top left", "bottom left"]  # default when label_pos is blank
+if "label_pos" not in TOWNS:
+    TOWNS["label_pos"] = ""
+TOWNS["label_pos"] = [p if isinstance(p, str) and p.strip() else _ROTATE[k % 4]
+                      for k, p in enumerate(TOWNS["label_pos"])]
 TOWN_NOTES = {"Kolkata": "Inland, but on the tidal Hooghly river: surge can travel upriver."}
-N_NEAREST = 10  # towns shown by default (the rest under "show all"); also the towns labelled on the map
+N_NEAREST = 10  # towns in the table by default (the rest under "show all"); darker on the map
 
 
 def exposure_rows(storm_lat: float, storm_lon: float) -> list[dict]:
@@ -55,7 +60,7 @@ def exposure_rows(storm_lat: float, storm_lon: float) -> list[dict]:
             "Coastal: higher exposure to wind and surge" if coastal else
             "Inland: lower wind exposure, but heavy rain and river flooding can still affect them")
         rows.append({"town": t["town"], "state": t["state"], "lat": float(t["lat"]), "lon": float(t["lon"]),
-                     "coastal": coastal, "storm_km": float(km), "note": note})
+                     "coastal": coastal, "storm_km": float(km), "note": note, "label_pos": t["label_pos"]})
     return sorted(rows, key=lambda r: r["storm_km"])
 
 ALERT_RATE = 0.20  # red threshold = the one that makes 20% of NI over-water validation rows red
@@ -381,13 +386,7 @@ CASEBOOK = [("Odisha cases", [("AMPHAN", 2020), ("YAAS", 2021), ("GULAB", 2021),
                                ("DANA", 2024)]),
             ("Other test storms", [("TAUKTAE", 2021), ("BIPARJOY", 2023), ("GATI", 2020)])]
 CASEBOOK_LABEL = "Test-period storms (2020 on), scored by the frozen model. Not tuned on these."
-BOB_VIEW = dict(lat=(6.0, 24.2), lon=(79.0, 97.0))  # Bay of Bengal + the Eastern India towns
-# Label positions so close-together towns do not overlap on the map (default: middle right).
-TOWN_LABEL_POS = {"Puri": "bottom center", "Bhubaneswar": "middle left", "Cuttack": "top right",
-                  "Paradip": "middle right", "Gopalpur": "bottom right", "Berhampur": "middle left",
-                  "Balasore": "middle right", "Angul": "bottom left", "Keonjhar": "top center",
-                  "Digha": "bottom left", "Bakkhali": "bottom right", "Haldia": "middle right",
-                  "Kolkata": "top right", "Kharagpur": "middle left", "Jamshedpur": "top left"}
+BOB_VIEW = dict(lat=(6.0, 25.0), lon=(79.0, 97.0))  # Bay of Bengal + Eastern India towns, room for labels
 MAP_ASPECT = 1.93  # map box width / height at 70vh on a 16:9 laptop window (measured in the browser)
 
 
@@ -538,9 +537,135 @@ def map_window(s: pd.DataFrame) -> tuple[tuple, tuple]:
     return lat_r, (mid_x - half_w, mid_x + half_w)
 
 
+# White halo around town names so they stay readable over coastlines and borders
+# (Plotly has no text background box for map labels; textfont.shadow draws the halo).
+HALO = "-1px -1px 1px #fff, 1px -1px 1px #fff, -1px 1px 1px #fff, 1px 1px 1px #fff, 0 0 3px #fff"
+
+
+# ---- town label layout -------------------------------------------------------------------------
+# Labels are placed in pixels for the map's own window, assuming the geo area is MAP_PX_W wide
+# (measured: 1165 px in a 1400 x 900 window; smaller windows shrink the map, not the text).
+MAP_PX_W = 1165.0
+CHAR_PX, TEXT_H, GAP, MARK_PX = 6.2, 14.0, 5.0, 9.0
+PAD = 2.5  # safety margin around each label: covers small offset differences in the browser
+# Measured against Plotly's own projection (gd._fullLayout.geo._subplot.projection) in the browser:
+# x matches to 0.05 px; Plotly draws everything Y_SHIFT px higher, and the geo box is 607 px tall.
+Y_SHIFT, H_EXTRA = -5.35, 2.4
+_POS = ["middle right", "middle left", "top center", "bottom center",
+        "top right", "bottom right", "top left", "bottom left"]
+
+
+def _label_box(x: float, y: float, w: float, pos: str, gap: float = GAP) -> tuple:
+    """Pixel box (x0, y0, x1, y1) of a label at point (x, y) for a Plotly textposition. gap = GAP for
+    labels next to a marker; 0 for text-only (leader) labels, which Plotly draws right at the point."""
+    v, h = pos.split()
+    x0 = {"left": x - gap - w, "center": x - w / 2, "right": x + gap}[h]
+    y0 = {"top": y - gap - TEXT_H, "middle": y - TEXT_H / 2, "bottom": y + gap}[v]
+    return (x0, y0, x0 + w, y0 + TEXT_H)
+
+
+def _hits(a: tuple, b: tuple) -> bool:
+    return not (a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1])
+
+
+def layout_labels(towns: list[dict], lat_r: tuple, lon_r: tuple) -> dict:
+    """Greedy label placement, nearest towns first. Each town gets the free textposition closest
+    to its preferred one (label_pos in towns.csv). If none of the 8 spots next to the marker is free
+    of other labels and town markers, the label moves out along a short leader line.
+    Returns {town: ("pos", textposition) or ("leader", label_lat, label_lon, textposition)}."""
+    k = MAP_PX_W / (lon_r[1] - lon_r[0])
+    top = _merc(lat_r[1])
+    xy = {r["town"]: ((r["lon"] - lon_r[0]) * k, (top - _merc(r["lat"])) * k + Y_SHIFT) for r in towns}
+    H = (top - _merc(lat_r[0])) * k + H_EXTRA
+    marks = {t: (x - MARK_PX / 2, y - MARK_PX / 2, x + MARK_PX / 2, y + MARK_PX / 2) for t, (x, y) in xy.items()}
+    placed, out = [], {}
+
+    def cost(box, own):
+        """Overlaps with placed labels and OTHER towns' markers (with PAD margin), +10 if off the map."""
+        off = box[0] < 0 or box[1] < 0 or box[2] > MAP_PX_W or box[3] > H
+        big = (box[0] - PAD, box[1] - PAD, box[2] + PAD, box[3] + PAD)
+        return (10 * off + sum(_hits(big, b) for b in placed)
+                + sum(_hits(big, m) for t, m in marks.items() if t != own))
+
+    for r in towns:  # already sorted nearest first
+        x, y = xy[r["town"]]
+        w = CHAR_PX * len(r["town"]) + 2
+        pref = r["label_pos"] if r["label_pos"] in _POS else "middle right"
+        order = [pref] + [p for p in _POS if p != pref]
+        best = min(order, key=lambda p: (cost(_label_box(x, y, w, p), r["town"]), order.index(p)))
+        box = _label_box(x, y, w, best)
+        if cost(box, r["town"]) == 0:
+            placed.append(box)
+            out[r["town"]] = ("pos", best)
+            continue
+        choice = None
+        for dist in (22, 32, 44, 58, 74, 92, 112, 135, 160):  # leader line: move the label out, 12 directions
+            for ang in range(0, 360, 30):
+                lx, ly = x + dist * np.cos(np.radians(ang)), y - dist * np.sin(np.radians(ang))
+                p = "middle right" if np.cos(np.radians(ang)) > 0.1 else (
+                    "middle left" if np.cos(np.radians(ang)) < -0.1 else
+                    ("top center" if np.sin(np.radians(ang)) > 0 else "bottom center"))
+                b = _label_box(lx, ly, w, p, gap=0.0)
+                if cost(b, r["town"]) == 0 and not _hits(b, marks[r["town"]]):
+                    choice = (lx, ly, p, b)
+                    break
+            if choice:
+                break
+        if choice is None:  # nothing free: keep the least-bad spot next to the marker
+            placed.append(box)
+            out[r["town"]] = ("pos", best)
+            continue
+        lx, ly, p, b = choice
+        placed.append(b)
+        inv = lambda yy: float(np.degrees(2 * np.arctan(np.exp(np.radians(yy))) - np.pi / 2))  # noqa: E731
+        out[r["town"]] = ("leader", inv(top - (ly - Y_SHIFT) / k), lon_r[0] + lx / k, p)
+    return out
+
+
+def add_towns(fig: go.Figure, storm_lat: float, storm_lon: float, lat_r: tuple, lon_r: tuple) -> None:
+    """Every town in towns.csv as a marker WITH its name. The N_NEAREST nearest to the storm centre
+    are dark and size 11; the others are grey and size 10. Crowded labels sit on a short leader line."""
+    towns = exposure_rows(storm_lat, storm_lon)
+    nearest = {r["town"] for r in towns[:N_NEAREST]}
+    lay = layout_labels(towns, lat_r, lon_r)
+    font = lambda rows: dict(size=[11 if r["town"] in nearest else 10 for r in rows],  # noqa: E731
+                             color=["#111" if r["town"] in nearest else "#555" for r in rows], shadow=HALO)
+    lead = [r for r in towns if lay[r["town"]][0] == "leader"]
+    if lead:  # thin leader lines, then the moved labels
+        la, lo = [], []
+        for r in lead:
+            _, a, b, _ = lay[r["town"]]
+            la += [r["lat"], a, None]
+            lo += [r["lon"], b, None]
+        fig.add_trace(go.Scattergeo(lat=la, lon=lo, mode="lines", line=dict(width=0.8, color="#777"),
+                                    hoverinfo="skip", showlegend=False))
+        fig.add_trace(go.Scattergeo(
+            lat=[lay[r["town"]][1] for r in lead], lon=[lay[r["town"]][2] for r in lead], mode="text",
+            text=[r["town"] for r in lead], textposition=[lay[r["town"]][3] for r in lead],
+            textfont=font(lead), hoverinfo="skip", showlegend=False))
+    for coastal, sym, nm in ((True, "square", "Town, coastal"), (False, "square-open", "Town, inland")):
+        tw = [r for r in towns if r["coastal"] == coastal]
+        near = [r["town"] in nearest for r in tw]
+        fig.add_trace(go.Scattergeo(
+            lat=[r["lat"] for r in tw], lon=[r["lon"] for r in tw], mode="markers+text", name=nm,
+            text=[r["town"] if lay[r["town"]][0] == "pos" else "" for r in tw],
+            textposition=[lay[r["town"]][1] if lay[r["town"]][0] == "pos" else "middle right" for r in tw],
+            textfont=font(tw),
+            marker=dict(symbol=sym, size=[8 if n else 7 for n in near],
+                        color=["#111" if n else "#666" for n in near],
+                        line=dict(width=1.5, color=["#111" if n else "#666" for n in near])),
+            hovertext=[f"<b>{r['town']}</b> ({r['state']})<br>{'Coastal' if r['coastal'] else 'Inland'}"
+                       f"<br>{r['storm_km']:.0f} km from storm centre"
+                       + (f"<br>{TOWN_NOTES[r['town']]}" if r["town"] in TOWN_NOTES else "") for r in tw],
+            hoverinfo="text"))
+
+
 def make_map(s: pd.DataFrame, i: int, reveal: bool, extra=None) -> go.Figure:
     shown = s if reveal else s.iloc[: i + 1]
     fig = go.Figure()
+    now = s.iloc[i]
+    lat_r, lon_r = map_window(s)
+    add_towns(fig, float(now["LAT"]), float(now["LON"]), lat_r, lon_r)  # first = under the storm track
     fig.add_trace(go.Scattergeo(lat=_l(shown["LAT"]), lon=_l(shown["LON"]), mode="lines",
                                 hoverinfo="skip", line=dict(width=2.5, color="#555"), showlegend=False))
     groups = [(lvl, COLOURS[lvl], shown["ALERT"] == lvl, lvl, "circle") for lvl in ("green", "amber", "red")]
@@ -567,19 +692,6 @@ def make_map(s: pd.DataFrame, i: int, reveal: bool, extra=None) -> go.Figure:
             hoverinfo="text"))
     if extra is not None:
         extra(fig)
-    now = s.iloc[i]
-    towns = exposure_rows(float(now["LAT"]), float(now["LON"]))
-    nearest = {r["town"] for r in towns[:N_NEAREST]}  # only these get a text label, to keep the map readable
-    for coastal, sym, nm in ((True, "square", "Town, coastal"), (False, "square-open", "Town, inland")):
-        tw = [r for r in towns if r["coastal"] == coastal]
-        fig.add_trace(go.Scattergeo(
-            lat=[r["lat"] for r in tw], lon=[r["lon"] for r in tw], mode="markers+text", name=nm,
-            text=[r["town"] if r["town"] in nearest else "" for r in tw],
-            textposition=[TOWN_LABEL_POS.get(r["town"], "middle right") for r in tw],
-            textfont=dict(size=11, color="#222"),
-            marker=dict(symbol=sym, size=8, color="#222", line=dict(width=1.5, color="#222")),
-            hovertext=[f"{r['town']} ({r['state']}): {r['storm_km']:.0f} km from storm centre"
-                       for r in tw], hoverinfo="text"))
     fig.add_trace(go.Scattergeo(lat=[float(now["LAT"])], lon=[float(now["LON"])], mode="markers",
                                 name="chosen time", hoverinfo="skip",
                                 marker=dict(size=20, color="rgba(0,0,0,0)",
