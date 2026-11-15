@@ -1,0 +1,106 @@
+{
+  "main_model": "NI-ONLY",
+  "main_file": "models/ri_lgbm.txt",
+  "main_copied_from": "models/ri_lgbm_ni.txt",
+  "features": [
+    "USA_WIND",
+    "USA_PRES",
+    "DWIND_6",
+    "DWIND_12",
+    "DWIND_24",
+    "DPRES_24",
+    "SPEED_12",
+    "DIR_12",
+    "SPEED_24",
+    "DIR_24",
+    "LAT",
+    "DIST2LAND",
+    "MONTH_SIN",
+    "MONTH_COS",
+    "BASIN"
+  ],
+  "categorical_features": [
+    "BASIN"
+  ],
+  "basin_categories": [
+    "EP",
+    "NA",
+    "NI",
+    "SA",
+    "SI",
+    "SP",
+    "WP"
+  ],
+  "models": {
+    "NI-ONLY": {
+      "file": "models/ri_lgbm_ni.txt",
+      "features": [
+        "USA_WIND",
+        "USA_PRES",
+        "DWIND_6",
+        "DWIND_12",
+        "DWIND_24",
+        "DPRES_24",
+        "SPEED_12",
+        "DIR_12",
+        "SPEED_24",
+        "DIR_24",
+        "LAT",
+        "DIST2LAND",
+        "MONTH_SIN",
+        "MONTH_COS",
+        "BASIN"
+      ],
+      "categorical_features": [
+        "BASIN"
+      ],
+      "best_iteration": 49
+    },
+    "ALL-BASINS": {
+      "file": "models/ri_lgbm_all.txt",
+      "features": [
+        "USA_WIND",
+        "USA_PRES",
+        "DWIND_6",
+        "DWIND_12",
+        "DWIND_24",
+        "DPRES_24",
+        "SPEED_12",
+        "DIR_12",
+        "SPEED_24",
+        "DIR_24",
+        "LAT",
+        "DIST2LAND",
+        "MONTH_SIN",
+        "MONTH_COS",
+        "BASIN"
+      ],
+      "categorical_features": [
+        "BASIN"
+      ],
+      "best_iteration": 288
+    },
+    "LEAVE-NI-OUT": {
+      "file": "models/ri_lgbm_leaveni.txt",
+      "features": [
+        "USA_WIND",
+        "USA_PRES",
+        "DWIND_6",
+        "DWIND_12",
+        "DWIND_24",
+        "DPRES_24",
+        "SPEED_12",
+        "DIR_12",
+        "SPEED_24",
+        "DIR_24",
+        "LAT",
+        "DIST2LAND",
+        "MONTH_SIN",
+        "MONTH_COS"
+      ],
+      "categorical_features": [],
+      "best_iteration": 53
+    }
+  },
+  "note": "Build inputs as DataFrame[features] with BASIN = pd.Categorical(BASIN, categories=basin_categories)."
+}
