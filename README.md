@@ -22,7 +22,7 @@ Veritas AI Hackathon 2026, AI + Climate. Every number below is copied from the f
 
 ## 2. Dataset
 
-**Source:** NOAA IBTrACS v4 (Knapp et al. 2018, doi 10.25921/82ty-9e16), file `ibtracs.since1980.list.v04r01.csv`: all basins since 1980 (CLAUDE.md).
+**Source:** NOAA IBTrACS v04r01 (Knapp et al.), NOAA National Centers for Environmental Information, https://doi.org/10.25921/82ty-9e16, file `ibtracs.since1980.list.v04r01.csv`: all basins since 1980 (CLAUDE.md).
 
 **Cleaning rules** (CLAUDE.md):
 1. Load with `keep_default_na=False`, so the basin code "NA" (North Atlantic) is not read as missing.
@@ -137,26 +137,7 @@ Climatology is reported on validation only: its North Indian Ocean PR-AUC was 0.
 
 ## How to run
 
-```bash
-py -3.12 -m pip install -r requirements.txt
-```
-
-```bash
-py -3.12 app/app.py
-```
-
-Then open http://127.0.0.1:7860 (on Windows PowerShell: `py -3.12 app\app.py`).
-
-`data/` and `models/` are gitignored, so most inputs are not in the repo:
-
-| File | In git? | Where it comes from |
-|---|---|---|
-| `data/processed/predictions.parquet` | yes (force-added) | Written by the single test run (`src/eval/test_run.py`) |
-| `data/processed/tracks.parquet` | no | Built by `src/data/clean.py` from the raw IBTrACS v4 CSV, `ibtracs.since1980.list.v04r01.csv` (https://doi.org/10.25921/82ty-9e16) |
-| `data/processed/train.parquet`, `val.parquet` | no | Built by `src/data/split.py` |
-| `models/ri_lgbm.txt`, `models/ri_lgbm_features.json` | no | Trained by `src/models/ri_model.py`. Get the frozen files from the team; their SHA-256 must match docs/freeze.md |
-
-The app reads `predictions.parquet` and `tracks.parquet`, plus the frozen model for the "Forecast a storm now" tab. It never reads `test.parquet`.
+You need Python 3.11 or newer (tested with 3.12 and 3.13). Clone the repository, then from its root create a virtual environment and install the requirements: python -m venv .venv, then .venv\Scripts\python -m pip install -r requirements.txt (on macOS or Linux use .venv/bin/python in place of .venv\Scripts\python). Start the app with .venv\Scripts\python app\app.py and open http://127.0.0.1:7860 in a browser; the first start can take about a minute. The app uses the frozen model in models/ and the saved test-run predictions in data/processed/predictions.parquet. It checks the model's SHA-256 against docs/freeze.md at start-up and never reads the test split.
 
 ## AI tools used
 
@@ -165,7 +146,7 @@ The app reads `predictions.parquet` and `tracks.parquet`, plus the frozen model 
 
 ## Credits
 
-- **IBTrACS v4**, NOAA (Knapp et al. 2018, doi 10.25921/82ty-9e16): cyclone track data.
+- **NOAA IBTrACS v04r01 (Knapp et al.), NOAA National Centers for Environmental Information, https://doi.org/10.25921/82ty-9e16**: cyclone track data.
 - **LightGBM**, **scikit-learn**, **pandas**: modelling and evaluation.
 - **Plotly**, **Gradio**: the app.
 - **IMD**, the India Meteorological Department: the official forecasts CycloneWatch sits beside.
